@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "decision": {
+    "provider": "typesafe",
+    "model": "jev-latest",
+    "transport": "http",
+    "timeoutMs": 30000,
+    "retries": 2,
+    "immutableModel": false,
+    "keyStore": "environment",
+    "gatewayOptions": {}
+  },
+  "runtime": {
+    "maxParallel": 3,
+    "maxRepairs": 3,
+    "maxSameFailure": 2,
+    "maxWorkerStarts": 40,
+    "maxDecisions": 200,
+    "maxRunMs": 7200000,
+    "maxTasks": 24,
+    "maxLogBytes": 8000000
+  },
+  "thresholds": {
+    "route": 0.5,
+    "accept": 0.8,
+    "highRiskAccept": 0.9,
+    "evidence": 0.8
+  },
+  "profiles": [],
+  "trusts": {}
+}

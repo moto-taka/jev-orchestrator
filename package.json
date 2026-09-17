@@ -1,0 +1,44 @@
+{
+  "name": "jev-orchestrator",
+  "version": "0.1.0",
+  "description": "Jev decides. Your coding CLIs execute. A local, evidence-driven orchestrator.",
+  "type": "module",
+  "bin": {
+    "jvo": "bin/jvo.mjs"
+  },
+  "engines": {
+    "node": "^22.16.0 || >=24.0.0"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "scripts/build.mjs",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/jvo.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test test/*.test.ts",
+    "test:live": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test test/live.test.ts",
+    "check": "npm run typecheck && npm test",
+    "demo": "node bin/jvo.mjs demo",
+    "build": "node --disable-warning=ExperimentalWarning scripts/build.mjs",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
+    "pretest": "npm run build",
+    "test:package": "node scripts/check-package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "typescript": "5.8.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moto-taka/jev-orchestrator.git"
+  },
+  "license": "MIT"
+}
