@@ -71,7 +71,8 @@ export class Engine extends EventEmitter {
         invocationId: String(d.invocationId ?? ''), time: e.time, taskId: String(d.taskId ?? ''), taskSpecId: String(d.taskSpecId ?? ''),
         profileId: String(d.profileId ?? ''), adapter: String(d.adapter ?? 'codex') as AgentTrace['adapter'], role: String(d.role ?? 'implementer') as Role,
         provider: typeof d.provider === 'string' ? d.provider : undefined, configuredModel: typeof d.configuredModel === 'string' ? d.configuredModel : undefined,
-        observedModel: typeof d.observedModel === 'string' ? d.observedModel : undefined, sessionId: typeof d.sessionId === 'string' ? d.sessionId : undefined,
+        observedModel: typeof d.observedModel === 'string' ? d.observedModel : undefined, effort: typeof d.effort === 'string' ? d.effort : undefined,
+        sessionId: typeof d.sessionId === 'string' ? d.sessionId : undefined,
         type: String(d.type ?? 'text') as AgentTrace['type'], text: typeof d.text === 'string' ? terminalText(d.text) : undefined,
       };
     }).filter(e => e.invocationId && e.taskId && e.profileId);
