@@ -16,9 +16,9 @@ function fixture(): View {
       evidence: [], findings: [], sameFailure: 0, staged: false, contextIds: [], activeProfileId: 'pi_231b6b4926dfb0478b8f', activeRole: 'scout',
     }],
     agentEvents: [
-      { invocationId: 'op1', time: '2026-09-19T00:50:00.000Z', taskId: 'run_T1', taskSpecId: 'T1', profileId: 'pi_231b6b4926dfb0478b8f', adapter: 'pi', role: 'scout', provider: 'openrouter', configuredModel: 'qwen3-coder', type: 'started', text: 'バグ探索' },
-      { invocationId: 'op1', time: '2026-09-19T00:50:01.000Z', taskId: 'run_T1', taskSpecId: 'T1', profileId: 'pi_231b6b4926dfb0478b8f', adapter: 'pi', role: 'scout', provider: 'openrouter', configuredModel: 'qwen3-coder', observedModel: 'qwen3-coder', type: 'model', text: 'qwen3-coder' },
-      { invocationId: 'op1', time: '2026-09-19T00:50:02.000Z', taskId: 'run_T1', taskSpecId: 'T1', profileId: 'pi_231b6b4926dfb0478b8f', adapter: 'pi', role: 'scout', provider: 'openrouter', configuredModel: 'qwen3-coder', observedModel: 'qwen3-coder', type: 'tool', text: 'read src/auth.ts' },
+      { invocationId: 'op1', time: '2026-09-19T00:50:00.000Z', taskId: 'run_T1', taskSpecId: 'T1', profileId: 'pi_231b6b4926dfb0478b8f', adapter: 'pi', role: 'scout', provider: 'openrouter', configuredModel: 'qwen3-coder', effort: 'high', type: 'started', text: 'バグ探索' },
+      { invocationId: 'op1', time: '2026-09-19T00:50:01.000Z', taskId: 'run_T1', taskSpecId: 'T1', profileId: 'pi_231b6b4926dfb0478b8f', adapter: 'pi', role: 'scout', provider: 'openrouter', configuredModel: 'qwen3-coder', observedModel: 'qwen3-coder', effort: 'high', type: 'model', text: 'qwen3-coder' },
+      { invocationId: 'op1', time: '2026-09-19T00:50:02.000Z', taskId: 'run_T1', taskSpecId: 'T1', profileId: 'pi_231b6b4926dfb0478b8f', adapter: 'pi', role: 'scout', provider: 'openrouter', configuredModel: 'qwen3-coder', observedModel: 'qwen3-coder', effort: 'high', type: 'tool', text: 'read src/auth.ts' },
     ],
     events: [], usage: [], decisions: [],
   };
@@ -30,7 +30,7 @@ test('parent TUI shows human CLI/model/role instead of opaque profile id', () =>
   const state: ScreenState = { input: '', cursor: 0, panel: '', scroll: 0, agentIndex: 0 };
   const screen = renderScreen(view, state, 120, 34).lines.join('\n');
   assert.match(screen, /Pi · openrouter\/qwen3-coder · scout · T1/);
-  assert.match(screen, /prefix pi · alias Qwen 3 Coder · model openrouter\/qwen3-coder/);
+  assert.match(screen, /prefix pi · alias Qwen 3 Coder · model openrouter\/qwen3-coder · effort high/);
   assert.doesNotMatch(screen, /pi_231b6b4926dfb0478b8f/);
 });
 
@@ -41,7 +41,7 @@ test('focused agent stream exposes profile/session detail and live operation his
   const screen = renderScreen(view, state, 120, 34).lines.join('\n');
   assert.match(screen, /← Agent/);
   assert.match(screen, /profile: pi_231b6b4926dfb0478b8f/);
-  assert.match(screen, /model: observed qwen3-coder/);
+  assert.match(screen, /model: observed qwen3-coder · effort: high/);
   assert.match(screen, /tool\s+read src\/auth\.ts/);
 });
 
