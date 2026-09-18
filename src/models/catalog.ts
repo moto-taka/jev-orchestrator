@@ -32,8 +32,10 @@ function piEfforts(m: Record<string, any>): string[] {
   if (m.reasoning !== true) return ['off'];
   const map = m.thinkingLevelMap;
   if (map && typeof map === 'object' && !Array.isArray(map)) {
-    const explicit = EFFORTS.filter(level => (map as Record<string, unknown>)[level] !== null);
-    if (explicit.length) return [...explicit];
+    const values = map as Record<string, unknown>;
+    const standard = ['off','minimal','low','medium','high'].filter(level => !Object.hasOwn(values, level) || values[level] !== null);
+    const extended = ['xhigh','max'].filter(level => Object.hasOwn(values, level) && values[level] !== null);
+    return [...standard, ...extended];
   }
   return ['off','minimal','low','medium','high'];
 }
