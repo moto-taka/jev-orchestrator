@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import type { AgentAdapter, AgentTrace, Candidate, Config, Decision, DecisionProvider, Evaluation, Evidence, Invocation, Json, Operation, Profile, Question, Role, Run, PeerMessage, Task, TaskSpec, Trust, View, WorkerReport } from './types.ts';
+import type { AgentAdapter, AgentTrace, Candidate, Config, Decision, DecisionProvider, Evaluation, Evidence, HandoffBundle, Invocation, Json, Operation, Profile, Question, Role, Run, PeerMessage, Task, TaskSpec, Trust, View, WorkerReport } from './types.ts';
 import { Store } from './storage.ts';
 import { Workspaces, assertChanges, changedPaths, dirty, fingerprint, git, repository } from './workspaces.ts';
 import { canonical, clip, errorText, hash, id, invariant, json, now, privateDir, safeChild } from './util.ts';
@@ -81,18 +81,18 @@ export class Engine extends EventEmitter {
       events: journal.filter(e => e.kind !== 'agent.trace').slice(-200).filter(e => typeof e.data.text === 'string' && e.data.text.length > 0)
         .map(e => ({ time: e.time, kind: e.kind, taskId: typeof e.data.taskId === 'string' ? e.data.taskId : undefined, text: terminalText(String(e.data.text)) })) };
   }
-  private profileDisplay(profileId?: string, observedModel?: string): string {
+  private profileDisplay(profileId?: string, observedModel?: string, effort?: string): string {
     const p = this.run.config.profiles.find(profile => profile.id === profileId);
     if (!p) return profileId ?? '未割当';
     const names: Record<string, string> = { codex: 'Codex', claude: 'Claude', pi: 'Pi', opencode: 'OpenCode' };
     let model = observedModel ?? p.model;
     if (model && p.provider && !model.startsWith(p.provider + '/')) model = p.provider + '/' + model;
-    return `${names[p.adapter] ?? p.adapter} · ${model ?? 'default / 未観測'}`;
+    return `${names[p.adapter] ?? p.adapter} · ${model ?? 'default / 未観測'}${effort && effort !== 'default' ? ` · ${effort}` : ''}`;
   }
   private traceAgent(invocationId: string, task: Task, profile: Profile, role: Role, type: AgentTrace['type'], text?: string, observedModel?: string, sessionId?: string): void {
     this.store.event(this.runId, 'agent.trace', {
       invocationId, taskId: task.id, taskSpecId: task.spec.id, profileId: profile.id, adapter: profile.adapter, role,
-      provider: profile.provider, configuredModel: profile.model, observedModel: observedModel ?? task.observedModel,
+      provider: profile.provider, configuredModel: profile.model, observedModel: observedModel ?? task.observedModel, effort: task.activeEffort ?? task.effort ?? profile.thinking,
       sessionId: sessionId ?? task.sessionId, type, text: text === undefined ? undefined : this.guard.redact(terminalText(text)).slice(0, 5000),
     });
     this.notify();
@@ -415,7 +415,51 @@ export class Engine extends EventEmitter {
   private modelFacts(p: Profile): object {
     return { id: p.id, cli: p.adapter, provider: p.provider, model: p.model, name: p.modelName,
       description: p.modelDescription, contextWindow: p.contextWindow, reasoning: p.reasoning,
-      roles: p.roles, level: p.level };
+      efforts: this.profileEfforts(p), roles: p.roles, level: p.level };
+  }
+  private profileEfforts(p: Profile): string[] {
+    if (p.efforts?.length) return [...new Set(p.efforts)];
+    if (p.thinking) return [p.thinking];
+    if (!p.reasoning) return ['default'];
+    if (p.adapter === 'pi') return ['off','minimal','low','medium','high'];
+    if (p.adapter === 'codex') return ['low','medium','high'];
+    return ['default'];
+  }
+  private runtimeProfile(profile: Profile, effort?: string): Profile {
+    const allowed = this.profileEfforts(profile), selected = effort ?? (allowed.length === 1 ? allowed[0] : 'default');
+    invariant(allowed.includes(selected), 'Selected effort is outside the model-supported effort pool');
+    return { ...profile, thinking: selected === 'default' || selected === 'off' && profile.adapter === 'codex' ? undefined : selected };
+  }
+  private reviewGatePass(task: Task, checks: Record<string, unknown>): boolean {
+    const prob = (key: string) => {
+      const a = checks[key] as any; return a?.kind === 'boolean' ? a.probability ?? 0 : 0;
+    };
+    const choiceSafe = (key: string) => {
+      const a = checks[key] as any;
+      return a?.kind === 'choice' && ['safe','not_applicable'].includes(a.selected)
+        && (a.confidence ?? a.probabilities?.[a.selected] ?? 0) >= this.run.config.thresholds.accept;
+    };
+    const correctness = checks.correctnessQuality as any;
+    const threshold = task.requiredReviews > 1 ? this.run.config.thresholds.highRiskAccept : this.run.config.thresholds.accept;
+    return prob('evidenceAdequate') >= this.run.config.thresholds.evidence
+      && prob('requirementsMet') >= threshold
+      && prob('diffRequirementFit') >= threshold
+      && prob('testsProtectBehavior') >= this.run.config.thresholds.evidence
+      && prob('scopePreserved') >= threshold
+      && correctness?.kind === 'score' && correctness.value >= 3
+      && choiceSafe('securityGate') && choiceSafe('compatibilityGate');
+  }
+  private reviewGateState(task: Task): Json {
+    const current = task.snapshot ?? task.base ?? this.run.integrationHead;
+    const latest = (kind: Evidence['kind'], limit: number) => task.evidence.filter(e => e.kind === kind && e.snapshot === current).slice(-limit).map(e => ({
+      producer: e.producer, trust: e.trust, content: clip(this.store.readArtifact(e.sourceHash), 30_000).text
+    }));
+    return json({
+      goal: this.run.goal, clarification: this.run.pendingMessage, task: task.spec, requirements: task.spec.acceptance,
+      snapshot: current, diff: latest('code-diff', 1), tests: latest('test', 3),
+      independentReviews: latest('review', Math.max(1, task.requiredReviews + 1)),
+      findings: task.findings, explicitNoTestsApproval: this.run.trust.allowNoTests,
+    });
   }
   private authorityHash(task: Task): string {
     const run = this.run;
