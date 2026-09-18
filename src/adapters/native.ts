@@ -20,7 +20,7 @@ export class EventParser {
     const emitText = (v: unknown, final = false) => {
       if (typeof v !== 'string') return;
       if (final) { this.text = v; this.lastAssistant = v; } else this.partial = (this.partial + v).slice(-2_000_000);
-      result.push({ type: 'text', text: v });
+      result.push({ type: 'text', text: v, key: final ? 'final' : 'delta' });
     };
     const session = (v: unknown) => { if (typeof v === 'string' && v.length < 1024 && !/[\x00-\x1f]/.test(v)) { this.sessionId = v; result.push({ type: 'session', sessionId: v }); } };
     const model = (v: unknown) => { if (typeof v === 'string' && v.length < 300 && !/[\\x00-\\x1f]/.test(v) && v !== this.model) { this.model = v; result.push({ type: 'model', model: v, text: v }); } };
