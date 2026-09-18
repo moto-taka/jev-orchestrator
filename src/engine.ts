@@ -807,6 +807,8 @@ export class Engine extends EventEmitter {
       for (const spec of specs) {
         const localId = mapping.get(spec.id)!;
         const next = makeTask(this.run, { ...spec, id: localId, instruction: `Original requirement: ${this.run.goal}\n\n${spec.instruction}`, dependsOn: spec.dependsOn.length ? spec.dependsOn.map(dep => `${this.runId}_${mapping.get(dep)!}`) : task.spec.dependsOn });
+        // Preserve the planner/scout evidence as handoff candidates. The recipient-specific packer will decide exact/reference/drop later.
+        next.contextIds = [...task.contextIds]; next.evidence = task.evidence.map(e => ({ ...e }));
         invariant(!this.store.get('tasks', next.id), 'Plan task already exists');
         this.store.put('tasks', next.id, this.runId, next);
       }
@@ -1032,7 +1034,7 @@ export class Engine extends EventEmitter {
     const conflictId = `merge-${task.spec.id}`;
     const conflict = makeTask(this.run, { id: conflictId, title: `Resolve integration conflicts for ${task.spec.title}`, instruction: `Resolve the merge conflicts without losing either accepted task's requirements. Conflicted paths: ${result.conflicts.join(', ')}. Original request: ${this.run.goal}`, acceptance: task.spec.acceptance, dependsOn: [], readPaths: ['**'], writePaths: ['**'], resources: ['integration'] }, 'conflict');
     conflict.workspace = this.run.integration; conflict.base = this.run.base;
-    conflict.evidence = task.evidence; this.store.put('tasks', conflict.id, this.runId, conflict);
+    conflict.contextIds = [...task.contextIds]; conflict.evidence = task.evidence.map(e => ({ ...e })); this.store.put('tasks', conflict.id, this.runId, conflict);
     this.log('conflict', '統合競合を独立した修正タスクとして作成しました。再検証・再レビューを行います。', conflict.id);
   }
   private async prepareFinal(): Promise<void> {
