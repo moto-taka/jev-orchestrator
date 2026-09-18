@@ -5,8 +5,8 @@ class Jvo < Formula
   # Pin the tested application commit, not the mutable main branch.
   url "ssh://git@github.com/moto-taka/jev-orchestrator.git",
       using: :git,
-      revision: "6a122bff5506d521a1230eb78379e3d0dccc13a3"
-  version "0.1.0"
+      revision: "ddc787dd769d82ed7cb2a4a8a7b08e5bb29b71f6"
+  version "0.2.0"
   license "MIT"
 
   depends_on "node@24"
@@ -28,13 +28,16 @@ class Jvo < Formula
 
   def caveats
     <<~EOS
-      Run `jvo setup` to configure Jev and select your installed coding CLIs.
-      In a project, run `jvo trust`, then `jvo`.
+      Run `jvo setup` for first-time Jev configuration.
+      Run `jvo models` to select multiple allowed models for each CLI.
+      Jev selects the model and role from your allowed pool at runtime.
+      In a project, run `jvo trust`, then `jvo`; `/messages` shows native peer conversations.
       `jvo demo` exercises an isolated local workflow without API credentials.
 
       This tap and its source are private. Updates require GitHub SSH access.
       Your agent CLIs and their authentication are not installed or changed.
       The bundled Node.js path is used without changing your shell's Node.
+      Existing runs retain their policy; pause/exit before explicitly refreshing it.
     EOS
   end
 
@@ -42,7 +45,10 @@ class Jvo < Formula
     ENV["JVO_HOME"] = (testpath/"state").to_s
     ENV["TMPDIR"] = testpath.to_s
     assert_equal version.to_s, shell_output("#{bin}/jvo --version").strip
-    assert_match "Jev Orchestrator", shell_output("#{bin}/jvo --help")
+    help = shell_output("#{bin}/jvo --help")
+    assert_match "Jev Orchestrator", help
+    assert_match "jvo models", help
+    assert_match "jvo messages", help
     result = JSON.parse(shell_output("#{bin}/jvo demo --json").lines.last)
     assert_equal true, result.fetch("demo")
     assert_equal "ready_for_user_apply", result.fetch("status")

@@ -30,13 +30,17 @@ jvo
 ```sh
 brew update
 brew upgrade moto-taka/jev-orchestrator/jvo
+jvo --version  # 0.2.0
+jvo models     # CLIごとに複数の許可モデルを選択。Jevキーの再入力は不要
 
 # プログラムだけを削除します。作業場・履歴・キーは自動削除しません。
 brew uninstall moto-taka/jev-orchestrator/jvo
 brew untap moto-taka/jev-orchestrator
 ```
 
-現行formulaはアプリケーション **0.1.0 / commit `6a122bff5506d521a1230eb78379e3d0dccc13a3`** に固定されています。未検証のmainへ勝手に更新しません。次のリリース時にformulaの `revision`（Git commit指定）と `version` を一緒に更新します。formulaの `revision:` と、Homebrewパッケージ再ビルド番号の `revision 1` は別物です。
+現行formulaはアプリケーション **0.2.0 / commit `ddc787dd769d82ed7cb2a4a8a7b08e5bb29b71f6`** に固定されています。未検証のmainへ勝手に更新しません。次のリリース時にformulaの `revision`（Git commit指定）と `version` を一緒に更新します。formulaの `revision:` と、Homebrewパッケージ再ビルド番号の `revision 1` は別物です。
+
+進行中のrunは開始時のモデル設定を保持します。設定を更新する場合はTUIで `/pause` → `/exit` を実行し、`jvo models` で選択後、`jvo resume <run-id> --refresh-policy` で再承認した設定を取り込みます。変更されたモデルのsessionや検証結果は再確認対象になります。[モデル設定](models.md)・[内蔵通信](agent-messaging.md)
 
 ## 認証で失敗した場合
 
@@ -69,7 +73,7 @@ git config --global \
 brew test moto-taka/jev-orchestrator/jvo
 ```
 
-formula testは、version/help、実際のGit・SQLite・子プロセスを通す隔離デモ、2回目の同一session修正、最終状態、journalの整合性を確認します。デモのJev判断とworkerはfixtureであり、実APIの成功を示すものではありません。
+formula testは、version/help、新コマンドの登録、実際のGit・SQLite・子プロセスを通す隔離デモ、2回目の同一session修正、最終状態、journalの整合性を確認します。デモのJev判断とworkerはfixtureであり、実APIの成功を示すものではありません。モデル選択とnative A2Aの回帰試験は通常の `npm run check` で実行します。
 
 `.github/workflows/homebrew.yml` はmacOS上で本物の `brew tap` / `brew install` / `brew test` を実行します。privateソースの資格情報を配布しないため、CIではcheckout済みのGit履歴を同じ固定commitのローカルミラーにします。利用者のSSH認証、Linux版Homebrew、実CLI認証はこのCIでは検証しません。CIの実結果はActionsを確認してください。
 
