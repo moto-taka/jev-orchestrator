@@ -1,18 +1,20 @@
 # Jev Orchestrator
 
-## 0.3.0: 決まった処理ではJevを呼びません
+## 0.4.0: Review Gate・recipient handoff・Effort routing
 
-Jevは方針・モデル・役割・例外・合否を判断します。通常のA2A配送、同じ担当への返答、限定した修正、合格後の統合は、承認済み範囲内でコードが進めます。チェックや独立レビューをなくす変更ではありません。通常コードの記録はJevの実判断と区別します。
+Jevは方針・モデル・役割・Effort・例外・最終合否を判断します。通常のA2A配送、同じsessionへの返答、限定した修正、合格後の統合は、承認済み範囲内でコードが進めます。
+
+最終承認は、**要件 + current diff + 実テスト + 独立レビュー**をまとめたJev Review Gateで行います。新しいAgent/sessionへ作業を渡すときは、recipient別に証拠を `exact / reference / drop` で選別するHandoff Packerを使います。少量のhandoffではJevを呼びません。EffortはCLIが公開した対応範囲だけを候補にし、モデルと同じJev routing request内で選択します。[Review Gate・Handoff・Effort](docs/review-handoff-effort.md)
 
 ```sh
 brew update
 brew upgrade moto-taka/jev-orchestrator/jvo
-jvo --version # 0.3.0
+jvo --version # 0.4.0
 ```
 
-新規runは新制御です。既存runを切り替える場合だけ、TUIで `/pause` → `/exit` 後に `jvo resume <run-id> --refresh-policy` を実行してください。APIキーや許可モデルを再入力する必要はありません。[判断削減・安全条件](docs/lean-decisions.md)
+新規runは新制御です。既存runを新しい許可モデル/Effort情報へ更新する場合は、TUIで `/pause` → `/exit` 後に `jvo models`、必要なら `jvo resume <run-id> --refresh-policy` を実行してください。[判断削減・安全条件](docs/lean-decisions.md)
 
-任意の `jvo triage reports.json` も追加しました。保存した報告を仕分け、`--allow-api` を指定した場合だけ曖昧なものをJevへまとめて問い合わせます。`--operator=<許可済みprofile-id> --allow-worker` で注意対象だけをモデルへまとめて相談できます。通常のjvoに別の常駐司令塔は追加しません。[報告の仕分け](docs/report-triage.md)
+任意の `jvo triage reports.json` も利用できます。保存した報告を仕分け、`--allow-api` を指定した場合だけ曖昧なものをJevへまとめて問い合わせます。`--operator=<許可済みprofile-id> --allow-worker` で注意対象だけをモデルへまとめて相談できます。通常のjvoに別の常駐司令塔は追加しません。[報告の仕分け](docs/report-triage.md)
 
 **Jev decides. Your CLIs build.**
 
@@ -20,7 +22,7 @@ jvo --version # 0.3.0
 
 ![実装したTUIのデモ実行画面](docs/tui.svg)
 
-Jevはコードや計画文を生成しません。難易度、担当、計画の採否、追加調査、レビュー、差し戻し、統合、完了承認を型付きの選択として返します。実作業は既存CLIが行い、ローカルの実行コアが証拠・権限・排他・予算・状態を管理します。
+Jevはコードや計画文を生成しません。難易度、担当モデル・役割・Effort、計画の採否、追加調査、handoffで残す証拠、Review Gate、例外時の差し戻しを型付きの選択として返します。実作業は既存CLIが行い、ローカルの実行コアが証拠・権限・排他・予算・状態を管理します。
 
 > **検証範囲:** ローカルの自動テストと、実際のGit・SQLite・子プロセス・IPCを通す結合テストを実施しています。Jevの本番APIと、各社CLIの実認証を使った接続確認は別の検証です。認証済み実機との互換性、実運用の品質、キャッシュ削減率を未測定のまま保証しません。詳細は [検証記録](docs/verification.md) を参照してください。
 
@@ -75,22 +77,22 @@ jvo demo --json
 
 ## 許可モデルをCLIごとに複数選択
 
-0.2.0では、モデルIDや用途を一つずつ手入力する設定を廃止しました。CLIを選んだ後、そのCLIのモデル一覧でSpaceで複数チェックし、Enterで確定します。文字入力で検索、Ctrl+Aで表示中を全選択できます。**使ってよい集合は利用者が決め、モデルと役割の組み合わせはJevが実行時に決めます。**
+0.2.0では、モデルIDや用途を一つずつ手入力する設定を廃止しました。CLIを選んだ後、そのCLIのモデル一覧でSpaceで複数チェックし、Enterで確定します。文字入力で検索、Ctrl+Aで表示中を全選択できます。**使ってよいモデル集合は利用者が決め、モデル・役割・そのモデルが対応するEffortの組み合わせはJevが実行時に決めます。**
 
 ```sh
 brew update
 brew upgrade moto-taka/jev-orchestrator/jvo
-jvo --version   # 0.3.0
+jvo --version   # 0.4.0
 jvo models      # APIキーを再入力せず、モデルの許可だけ変更
 ```
 
-Piの同一モデル名でもproviderごとに別項目として保持し、既存のscoped modelsを初期選択の参考にします。グローバル拡張で登録したproviderの利用にも、明示許可で対応します。前回のモデル・役割固定は新しい一覧設定へ置き換えます。[取得方法・制約・既存runの更新](docs/models.md)
+Piの同一モデル名でもproviderごとに別項目として保持し、既存のscoped modelsを初期選択の参考にします。Codex/Piでreasoning Effortをmetadataから確認できる場合は、その対応範囲だけをJevの候補にします。Claude Code/OpenCodeには未確認のEffort flagを追加しません。グローバル拡張で登録したproviderの利用にも、明示許可で対応します。前回のモデル・役割固定は新しい一覧設定へ置き換えます。[取得方法・制約・既存runの更新](docs/models.md)
 
 ## jvo自身のエージェント間通信
 
 **agmsg・Orca・Herdrを使わず**、jvo内部で異なる担当の質問と返答を交換します。各workerが文章を書き、通常の配送・担当済み相手の回答・元sessionへの続行はjvoのコードが行います。未割当の相手のモデル選択や例外はJevが判断します。質問元のモデル/session/worktreeを保って返答だけを追加します。
 
-会話は同じrunの作業タスク間で、ターンの区切りに配送します。任意の外部端末への入力注入や、標準A2A ProtocolのネットワークAPIではありません。会話だけで合格にはならず、通常のテスト・独立レビュー・Jev承認を通します。`/messages` で配送状態と本文を確認できます。[内蔵通信の仕様・検証範囲](docs/agent-messaging.md)
+会話は同じrunの作業タスク間で、ターンの区切りに配送します。短い質問・返答はそのまま配送し、新しいAgent/sessionへまとまった作業を渡す場合だけrecipient別Handoff Bundleを作ります。任意の外部端末への入力注入や、標準A2A ProtocolのネットワークAPIではありません。会話だけで合格にはならず、通常のテスト・独立レビュー・Jev Review Gateを通します。`/messages` で配送状態と本文を確認できます。[内蔵通信の仕様・検証範囲](docs/agent-messaging.md)
 
 ## Jevの接続先
 
@@ -139,7 +141,7 @@ Tabでコマンド補完、↑↓で入力履歴、PgUp/PgDnで表示を移動�
 実装 session S1 / task worktree W1
     └─ 固定snapshotをテスト
         └─ 別sessionで独立レビュー
-            └─ Jevが判断
+            └─ Jev Review Gate（要件 + diff + test + review）
                 ├─合格 → run用の統合作業場 → 全体検証 → /apply
                 └─修正 → S1 / W1へ未解決の指摘だけ追加
 ```
@@ -164,7 +166,7 @@ providerのprompt cache、ローカルのartifact cache、Jevの厳密な判断�
 
 ## 安全性と制約
 
-workerの「完了しました」だけでは承認しません。対象snapshotに結び付いた実測テスト、独立レビュー、Jevの判断が必要です。古い証拠、消失した作業場、不明な終了、再利用条件が変わったsessionは自動的に成功扱いしません。
+workerの「完了しました」だけでは承認しません。対象snapshotに結び付いたcurrent diff、実測テスト、独立レビュー、要件適合を確認するJev Review Gateが必要です。maintainability等のadvisory scoreだけでscope外の変更を要求しません。古い証拠、消失した作業場、不明な終了、再利用条件が変わったsessionは自動的に成功扱いしません。
 
 **worktreeはOSのセキュリティsandboxではありません。** 標準アダプターは `trusted-local` であり、任意シェル実行や同一OSユーザーのアクセスを完全に閉じ込めた `managed` 環境としては表示しません。信頼できないコードには、別途VM等で隔離した実行環境が必要です。jvoの実行コアはpush・deployを実行しませんが、信頼済みローカルCLIの全操作をOSレベルで遮断するという保証ではありません。
 
