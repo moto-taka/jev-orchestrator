@@ -36,7 +36,7 @@ export interface Capabilities {
 }
 export interface Profile {
   modelName?: string; modelDescription?: string; modelSource?: 'cli' | 'saved' | 'alias';
-  contextWindow?: number; reasoning?: boolean; globalPiProviders?: boolean;
+  contextWindow?: number; reasoning?: boolean; efforts?: string[]; globalPiProviders?: boolean;
   tier?: 'fast' | 'standard' | 'deep' | 'review';
   id: string; adapter: AdapterId; binary: string; version: string;
   model?: string; provider?: string; thinking?: string;
@@ -82,6 +82,15 @@ export interface Finding {
 }
 export interface PeerQuestion { id: string; to: string; body: string; }
 export interface PeerReply { replyTo: string; body: string; }
+export interface HandoffItem {
+  id: string; kind: 'context' | Evidence['kind']; label: string; sourceHash: string;
+  mode: 'exact' | 'reference'; content?: string;
+}
+export interface HandoffBundle {
+  from: string; to: { role: Role; profileId: string; cli: AdapterId; model?: string; provider?: string; effort?: string };
+  task: TaskSpec; snapshot: string; summary?: string; openQuestions: string[];
+  items: HandoffItem[]; selection: 'all-small' | 'jev'; decisionId?: string;
+}
 export interface PeerMessage {
   id: string; runId: string; threadId: string; kind: 'question' | 'answer';
   fromTaskId: string; toTaskId: string; fromProfileId?: string; invocationId: string;
@@ -101,7 +110,7 @@ export interface Evidence {
 }
 export interface Task {
   implementationGrant?: { decisionId: string; policyHash: string };
-  reviewGrant?: { decisionId: string; profileId: string; profileHash: string; policyHash: string };
+  reviewGrant?: { decisionId: string; profileId: string; effort?: string; profileHash: string; policyHash: string };
   acceptanceGrant?: { decisionId: string; snapshot: string; proofHash: string };
   finalVerificationPending?: boolean;
   verificationFailure?: 'assertion' | 'environment' | 'unknown';
@@ -109,7 +118,7 @@ export interface Task {
   id: string; runId: string; spec: TaskSpec; version: number;
   phase: Phase; status: TaskStatus; kind: 'work' | 'conflict' | 'integration';
   workspace?: string; branch?: string; base?: string; snapshot?: string;
-  profileId?: string; activeProfileId?: string; activeRole?: Role; sessionId?: string; sessionFingerprint?: string; observedModel?: string;
+  profileId?: string; effort?: string; activeProfileId?: string; activeRole?: Role; activeEffort?: string; sessionId?: string; sessionFingerprint?: string; observedModel?: string;
   attempts: number; diagnoses: number; reviewCount: number; requiredReviews: number;
   evidence: Evidence[]; findings: Finding[]; proposedPlan?: TaskSpec[];
   assessments?: Record<string, Answer>;
@@ -136,7 +145,7 @@ export type ActionKind = 'REQUEST_SCOUT' | 'REQUEST_PLAN' | 'ACCEPT_PLAN' | 'STA
   | 'DELIVER_MESSAGE' | 'REJECT_MESSAGE' | 'ANSWER_PEER' | 'CONTINUE_AFTER_PEER';
 export interface Candidate {
   messageIds?: string[];
-  id: string; kind: ActionKind; taskId: string; profileId?: string;
+  id: string; kind: ActionKind; taskId: string; profileId?: string; effort?: string;
   sessionId?: string; workspace?: string; evidenceIds: string[];
   reason: string; specialization?: string; findingResolutions?: Record<string, Finding['status']>;
 }
@@ -160,13 +169,13 @@ export interface AgentEvent {
 }
 export interface AgentTrace {
   invocationId: string; time: string; taskId: string; taskSpecId: string;
-  profileId: string; adapter: AdapterId; role: Role;
+  profileId: string; adapter: AdapterId; role: Role; effort?: string;
   provider?: string; configuredModel?: string; observedModel?: string; sessionId?: string;
   type: 'started' | 'session' | 'model' | 'text' | 'tool' | 'error' | 'done' | 'completed';
   text?: string;
 }
 export interface Invocation {
-  id: string; runId: string; taskId: string; role: Role; profile: Profile;
+  id: string; runId: string; taskId: string; role: Role; profile: Profile; effort?: string;
   cwd: string; prompt: string; sessionId?: string; sessionDir: string;
   signal: AbortSignal; onEvent: (event: AgentEvent) => void;
   onSpawn?: (pid: number, birth?: string) => void;
