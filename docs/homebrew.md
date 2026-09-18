@@ -1,6 +1,6 @@
 # Homebrewでインストールする
 
-このリポジトリ自身をtapとして利用します。別の公開リポジトリを作らず、private設定を維持します。
+このリポジトリ自身をtapとして利用します。インストールのためにリポジトリの公開範囲や資格情報を変更しません。
 
 ## 初回
 
@@ -13,72 +13,63 @@ brew install moto-taka/jev-orchestrator/jvo
 jvo setup
 ```
 
-Homebrewの2引数形式は任意のGit URLを指定できます。1引数の `brew tap moto-taka/jev-orchestrator` は、別名の `homebrew-jev-orchestrator` リポジトリを探すため使いません。完全修飾したformula名で、このtapの `jvo` だけを選択します。
+2引数のtapで実際のGit URLを指定します。1引数だけの `brew tap moto-taka/jev-orchestrator` は別名の `homebrew-jev-orchestrator` を探すので使いません。
 
-formulaはNode.js 24を依存として導入し、その実体パスで起動します。ご自身のnvm/VoltaなどのNode設定を切り替える必要はありません。既存のcoding CLI、ログイン情報、Jevキーはインストール時に変更しません。
+Node.js 24は依存として入り、jvo専用の実体パスで起動します。nvm/Volta等の設定、既存CLIやログイン情報は変更しません。インストール中にJevへ通信しません。
 
 ```sh
 jvo --version
-jvo demo                 # APIキー不要。隔離したローカルのデモ
+jvo demo
 cd /path/to/your/project
 jvo trust
 jvo
 ```
 
-## 更新・削除
+## 0.3.0への更新
 
 ```sh
 brew update
 brew upgrade moto-taka/jev-orchestrator/jvo
-jvo --version  # 0.2.0
-jvo models     # CLIごとに複数の許可モデルを選択。Jevキーの再入力は不要
-
-# プログラムだけを削除します。作業場・履歴・キーは自動削除しません。
-brew uninstall moto-taka/jev-orchestrator/jvo
-brew untap moto-taka/jev-orchestrator
+jvo --version  # 0.3.0
 ```
 
-現行formulaはアプリケーション **0.2.0 / commit `ddc787dd769d82ed7cb2a4a8a7b08e5bb29b71f6`** に固定されています。未検証のmainへ勝手に更新しません。次のリリース時にformulaの `revision`（Git commit指定）と `version` を一緒に更新します。formulaの `revision:` と、Homebrewパッケージ再ビルド番号の `revision 1` は別物です。
-
-進行中のrunは開始時のモデル設定を保持します。設定を更新する場合はTUIで `/pause` → `/exit` を実行し、`jvo models` で選択後、`jvo resume <run-id> --refresh-policy` で再承認した設定を取り込みます。変更されたモデルのsessionや検証結果は再確認対象になります。[モデル設定](models.md)・[内蔵通信](agent-messaging.md)
-
-## 認証で失敗した場合
+モデルを選び直す場合は `jvo models` です。APIキーの再入力は不要です。新規runは通常配送・限定した修正等をコードで処理します。旧runを新しい制御へ移行する場合だけ、TUIで `/pause` → `/exit` 後に次を実行します。
 
 ```sh
-# 読取権限とSSH設定の確認。ファイルの変更はしません。
+jvo resume <run-id> --refresh-policy
+```
+
+既存ファイルは保持し、古いテスト・レビュー・継続権限を再確認します。[変更内容](lean-decisions.md)
+
+現行formulaは **0.3.0 / commit `31fed1465a8bf66b61b977ab66889906397f6930`** に固定されています。未検証のmainを自動実行する構成ではありません。次のリリースはFormulaのGit `revision:` と `version` を更新します。
+
+## 認証・競合
+
+```sh
 git ls-remote ssh://git@github.com/moto-taka/jev-orchestrator.git HEAD
 ```
 
-`Permission denied (publickey)` はSSH認証、`Repository not found` はURLまたは権限を確認してください。キーやトークンをformulaへ埋め込みません。tapのcloneとアプリケーションソースのfetchの**両方**に認証が必要です。
+SSH認証や読取権限をここで確認できます。tapのcloneとアプリケーションソース取得の両方に同じGit認証が必要です。キーやトークンをformulaに埋め込みません。
 
-HTTPSを使う場合はGitのcredential helperを先に設定し、同じリポジトリだけに対してSSH→HTTPSを書き換える方法があります。これは任意の手動設定であり、jvoが実行するものではありません。
+HTTPS認証へ切り替える場合は、Gitのcredential helperを設定した後、このリポジトリだけのURL書換えを任意で設定できます。jvoが自動変更するものではありません。
 
 ```sh
-# ghを既に利用している環境の例。必要なら先にgh auth loginを行います。
 gh auth setup-git
 git config --global \
   url."https://github.com/moto-taka/jev-orchestrator.git".insteadOf \
   ssh://git@github.com/moto-taka/jev-orchestrator.git
 ```
 
-その後、上の通常のtap/install手順を使います。元へ戻すには、上記の同じ設定キーに対して `git config --global --unset-all` を実行します。すべてのGitHub URLを書き換える設定は不要です。
+npm版と重複する場合は `which -a jvo` で実体を確認してください。不要なnpm版だけ、利用者の判断で `npm uninstall -g jev-orchestrator` を実行します。自動上書きや自動削除は行いません。
 
-以前npmでインストール済みで `jvo` が競合する場合は、`which -a jvo` で実体を確認してください。npm版の削除を希望する場合だけ `npm uninstall -g jev-orchestrator` を実行します。formulaは `--overwrite` や他のインストール元の自動削除を行いません。
-
-## ビルドとテストの範囲
-
-`Formula/jvo.rb` は、固定commitをGitで取得し、Node標準のtype strippingで `dist/` を生成します。ビルド中にnpmパッケージを取得せず、Jev API・worker・プロジェクトのsetupを呼びません。実行ファイルは `jvo`、資料はHomebrewの `share/jvo` へ配置します。
+## 検証・削除
 
 ```sh
 brew test moto-taka/jev-orchestrator/jvo
+brew uninstall moto-taka/jev-orchestrator/jvo
+brew untap moto-taka/jev-orchestrator
 ```
 
-formula testは、version/help、新コマンドの登録、実際のGit・SQLite・子プロセスを通す隔離デモ、2回目の同一session修正、最終状態、journalの整合性を確認します。デモのJev判断とworkerはfixtureであり、実APIの成功を示すものではありません。モデル選択とnative A2Aの回帰試験は通常の `npm run check` で実行します。
+brew testはversion/help、隔離したGit・SQLite・子プロセスを通す修正デモ、API不要の報告仕分けを確認します。実Jev API、利用者のSSH環境、認証済み各社CLIの成功を意味しません。macOS CIはcheckoutした同じGit履歴をローカルミラーにして、本物のbrew install/testを行います。
 
-`.github/workflows/homebrew.yml` はmacOS上で本物の `brew tap` / `brew install` / `brew test` を実行します。privateソースの資格情報を配布しないため、CIではcheckout済みのGit履歴を同じ固定commitのローカルミラーにします。利用者のSSH認証、Linux版Homebrew、実CLI認証はこのCIでは検証しません。CIの実結果はActionsを確認してください。
-
-## 一次資料
-
-- [Homebrew Taps](https://docs.brew.sh/Taps)
-- [Formula Cookbook](https://docs.brew.sh/Formula-Cookbook)
-- [node@24](https://formulae.brew.sh/formula/node@24)
+アンインストールで作業場、履歴、APIキーは自動削除しません。
