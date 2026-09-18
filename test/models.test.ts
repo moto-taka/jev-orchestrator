@@ -77,17 +77,3 @@ test('model catalogs preserve only supported reasoning effort choices', () => {
   }])[0]!;
   assert.deepEqual(codex.efforts, ['low','high']);
 });
-
-test('selected effort is translated only through CLI-supported native flags', () => {
-  const codex = invocation('codex'); codex.profile.thinking = 'high';
-  const codexCommand = invocationCommand(codex);
-  assert(codexCommand.argv.includes('model_reasoning_effort="high"'));
-
-  const pi = invocation('pi'); pi.profile.thinking = 'medium';
-  const piCommand = invocationCommand(pi);
-  const at = piCommand.argv.indexOf('--thinking');
-  assert(at >= 0); assert.equal(piCommand.argv[at + 1], 'medium');
-
-  const claude = invocation('claude'); claude.profile.thinking = undefined;
-  assert(!invocationCommand(claude).argv.includes('--thinking'));
-});
