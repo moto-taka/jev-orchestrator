@@ -434,7 +434,7 @@ export class Engine extends EventEmitter {
   private runtimeProfile(profile: Profile, effort?: string): Profile {
     const allowed = this.profileEfforts(profile), selected = effort ?? (allowed.length === 1 ? allowed[0] : 'default');
     invariant(allowed.includes(selected), 'Selected effort is outside the model-supported effort pool');
-    return { ...profile, thinking: selected === 'default' || selected === 'off' && profile.adapter === 'codex' ? undefined : selected };
+    return { ...profile, thinking: selected === 'default' ? undefined : selected };
   }
   private reviewGatePass(task: Task, checks: Record<string, unknown>): boolean {
     const prob = (key: string) => {
@@ -466,6 +466,85 @@ export class Engine extends EventEmitter {
       independentReviews: latest('review', Math.max(1, task.requiredReviews + 1)),
       findings: task.findings, explicitNoTestsApproval: this.run.trust.allowNoTests,
     });
+  }
+  private async buildHandoff(task: Task, role: Role, profile: Profile, effort: string | undefined, signal: AbortSignal): Promise<string> {
+    const snapshot = task.snapshot ?? task.base ?? this.run.integrationHead;
+    type Source = { id: string; kind: 'context' | Evidence['kind']; label: string; hash: string; content: string; pinned: boolean };
+    const sources: Source[] = [];
+    for (const h of task.contextIds) {
+      const content = this.store.readArtifact(h);
+      const first = content.split('\n', 1)[0]?.replace(/^SOURCE:\s*/, '') || h.slice(0, 12);
+      sources.push({ id: `context_${h.slice(0, 16)}`, kind: 'context', label: first, hash: h, content, pinned: false });
+    }
+    for (const e of task.evidence) {
+      if (role === 'reviewer' && e.kind === 'review') continue; // preserve review independence
+      const current = e.snapshot === snapshot;
+      const pinned = e.kind === 'user-request' || current && (e.kind === 'code-diff' || e.kind === 'test');
+      sources.push({ id: `evidence_${hash(e.id).slice(0, 16)}`, kind: e.kind, label: `${e.kind} · ${e.producer}`, hash: e.sourceHash,
+        content: this.store.readArtifact(e.sourceHash), pinned });
+    }
+    const optional = sources.filter(x => !x.pinned);
+    const choices = new Map<string, 'exact' | 'reference' | 'drop'>();
+    let decisionId: string | undefined;
+    if (optional.length <= 4) {
+      for (const item of optional) choices.set(item.id, 'exact');
+    } else {
+      const questions: Record<string, Question> = {};
+      for (const item of optional.slice(0, 48)) questions[`handoff_${hash(item.id).slice(0, 12)}`] = {
+        type: 'choice',
+        instructions: `For the recipient ${role} agent, decide how much of source ${item.label} is needed to continue task ${task.spec.id} without repeating already completed investigation. Preserve exact errors, constraints, contracts and evidence when they materially affect the recipient's work. Do not keep data merely because it was recently read.`,
+        criteria: {
+          exact: 'The recipient needs the actual content; losing details could change implementation or verification.',
+          reference: 'The recipient only needs to know this source was inspected or exists; the full content is not needed now and can be re-read.',
+          drop: 'This source is irrelevant, stale, duplicated, or not useful for the recipient task.'
+        }
+      };
+      const state = json({
+        purpose: 'recipient-specific handoff selection, not conversation compaction',
+        task: task.spec, snapshot, senderSummary: task.lastReport?.summary,
+        recipient: { role, model: this.modelFacts(profile), effort: effort ?? 'default' },
+        findings: task.findings.filter(f => !['fixed','not-applicable'].includes(f.status)),
+        sources: optional.slice(0, 48).map(item => ({ id: item.id, kind: item.kind, label: item.label,
+          excerpt: clip(item.content, 1600).text, chars: item.content.length }))
+      });
+      if (Object.keys(questions).length) {
+        const result = await this.evaluate(task, state, questions, signal);
+        invariant(result.fresh, 'Handoff selection became stale');
+        decisionId = result.decisionId;
+        for (const item of optional) {
+          const answer = result.evaluation.answers[`handoff_${hash(item.id).slice(0, 12)}`];
+          if (!answer || answer.kind !== 'choice') { choices.set(item.id, 'exact'); continue; }
+          const support = answer.confidence ?? answer.probabilities[answer.selected] ?? 0;
+          const selected = ['exact','reference','drop'].includes(answer.selected) ? answer.selected as 'exact' | 'reference' | 'drop' : 'exact';
+          // A low-confidence deletion becomes exact retention, never silent information loss.
+          choices.set(item.id, selected === 'drop' && support < this.run.config.thresholds.evidence ? 'exact' : selected);
+        }
+      }
+    }
+    const items: HandoffBundle['items'] = [];
+    let remaining = Math.max(8_000, Math.floor(this.run.trust.maxEvidenceBytes * 0.6));
+    for (const item of sources) {
+      const mode = item.pinned ? 'exact' : choices.get(item.id) ?? (optional.length > 48 ? 'reference' : 'exact');
+      if (mode === 'drop') continue;
+      if (mode === 'reference') { items.push({ id: item.id, kind: item.kind, label: item.label, sourceHash: item.hash, mode }); continue; }
+      const maxChars = Math.max(0, Math.min(item.content.length, Math.floor(remaining / 2)));
+      const content = maxChars > 0 ? clip(item.content, maxChars).text : undefined;
+      if (!content) { items.push({ id: item.id, kind: item.kind, label: item.label, sourceHash: item.hash, mode: 'reference' }); continue; }
+      remaining -= Buffer.byteLength(content);
+      items.push({ id: item.id, kind: item.kind, label: item.label, sourceHash: item.hash, mode: 'exact', content });
+    }
+    const bundle: HandoffBundle = {
+      from: task.profileId ? this.profileDisplay(task.profileId, task.observedModel, task.effort) : 'jvo/orchestrator',
+      to: { role, profileId: profile.id, cli: profile.adapter, model: profile.model, provider: profile.provider, effort },
+      task: task.spec, snapshot, summary: task.lastReport?.summary, openQuestions: task.lastReport?.questions ?? [],
+      items, selection: optional.length <= 4 ? 'all-small' : 'jev', decisionId
+    };
+    const artifact = this.store.artifact(this.runId, canonical(bundle));
+    this.store.event(this.runId, 'handoff.created', { taskId: task.id, role, profileId: profile.id, effort, artifact,
+      exact: items.filter(i => i.mode === 'exact').length, references: items.filter(i => i.mode === 'reference').length,
+      dropped: sources.length - items.length, decisionId });
+    this.log('handoff', `${task.spec.id} → ${this.profileDisplay(profile.id, undefined, effort)} · exact ${items.filter(i => i.mode === 'exact').length} / ref ${items.filter(i => i.mode === 'reference').length}`, task.id);
+    return canonical(bundle);
   }
   private authorityHash(task: Task): string {
     const run = this.run;
