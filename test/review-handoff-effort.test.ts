@@ -95,8 +95,8 @@ test('Jev chooses model effort in the same routing evaluation and the effort is 
         const candidates = (s.candidates ?? []) as Array<{ id: string; kind: string; effort?: string }>;
         for (const [key,q] of assignments) {
           const kind = key.slice('assignment_'.length);
-          const selected = candidates.find(c => c.kind === kind && c.effort === 'high')?.id ?? Object.keys((q as any).criteria)[0];
           const ids = Object.keys((q as any).criteria);
+          const selected = candidates.find(c => c.kind === kind && c.effort === 'high')?.id ?? ids[0]!;
           result.answers[key] = { kind: 'choice', selected, confidence: 1, probabilities: Object.fromEntries(ids.map(id => [id, id === selected ? 1 : 0])) };
         }
       }
