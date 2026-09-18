@@ -27,7 +27,7 @@ export function wrap(s: string, width: number): string[] {
   }
   return out;
 }
-export interface ScreenState { input: string; cursor: number; panel: string; scroll: number; notice?: string; detail?: string; demo?: boolean; agentIndex?: number; agentFocus?: boolean; }
+export interface ScreenState { input: string; cursor: number; panel: string; scroll: number; notice?: string; detail?: string; demo?: boolean; agentIndex?: number; agentSelected?: boolean; agentFocus?: boolean; }
 export const COMMANDS = ['/agents', '/tasks', '/diff', '/why', '/messages', '/usage', '/pause', '/resume', '/apply', '/recover', '/refresh', '/cancel', '/detach', '/help', '/exit'];
 const labels: Record<string, string> = { running: '実行中', paused: '一時停止', blocked: '確認待ち', ready_for_user_apply: '反映待ち', applied: '反映済み', cancelled: '取消済み', queued: '待機', waiting_for_peer: '担当の返答待ち', reported: '報告済み', reviewing: 'レビュー中', verifying: '検証中', accepted: '承認済み', done: '完了', rework: '修正中', staging: '統合中' };
 const number = (v?: number) => v === undefined ? '不明' : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
