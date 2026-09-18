@@ -95,6 +95,7 @@ export function invocationCommand(i: Invocation): { argv: string[]; env: NodeJS.
     args.push('exec'); if (i.sessionId) args.push('resume');
     args.push('--json', '-c', 'features.multi_agent=false', '-c', 'approval_policy="never"', '-c', `sandbox_mode="${writer ? 'workspace-write' : 'read-only'}"`);
     if (p.model) args.push('--model', p.model);
+    if (p.provider) args.push('-c', `model_provider=${JSON.stringify(p.provider)}`);
     if (p.thinking) args.push('-c', `model_reasoning_effort=${JSON.stringify(p.thinking)}`);
     if (i.sessionId) args.push(i.sessionId);
     args.push('-');
@@ -109,7 +110,7 @@ export function invocationCommand(i: Invocation): { argv: string[]; env: NodeJS.
     privateDir(i.sessionDir);
     sessionPath = join(i.sessionDir, 'session.jsonl');
     if (i.sessionId) invariant(existsSync(sessionPath), 'Pi session file is missing; refusing to silently create a replacement');
-    args.push('--print', '--mode', 'json', '--session', sessionPath, '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes',
+    args.push('--print', '--mode', 'json', '--session', sessionPath, ...(p.globalPiProviders ? ['--no-approve', '--no-context-files'] : ['--no-extensions']), '--no-skills', '--no-prompt-templates', '--no-themes',
       '--tools', writer ? 'read,grep,find,ls,edit,write,bash' : 'read,grep,find,ls');
     if (p.model) args.push('--model', p.model);
     if (p.provider) args.push('--provider', p.provider);

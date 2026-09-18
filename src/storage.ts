@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { canonical, hash, invariant, now, privateDir, safeChild } from './util.ts';
 import type { Decision, Operation, Run, Task, Usage } from './types.ts';
-const TABLES = new Set(['runs', 'tasks', 'attempts', 'profiles', 'sessions', 'workspaces', 'decisions', 'artifacts', 'usage', 'outbox', 'approvals']);
+const TABLES = new Set(['runs', 'tasks', 'attempts', 'profiles', 'sessions', 'workspaces', 'decisions', 'artifacts', 'usage', 'outbox', 'approvals', 'messages']);
 export class Store {
   root: string;
   db: DatabaseSync;
@@ -32,6 +32,10 @@ export class Store {
     this.db.exec('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, time TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, previous TEXT NOT NULL, hash TEXT NOT NULL); CREATE INDEX IF NOT EXISTS events_run ON events(run_id,seq); CREATE TABLE IF NOT EXISTS leases (resource TEXT PRIMARY KEY, owner TEXT NOT NULL, run_id TEXT NOT NULL, expires INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS memo (key TEXT PRIMARY KEY, decision_id TEXT NOT NULL, data TEXT NOT NULL);');
     this.db.prepare("INSERT OR IGNORE INTO meta VALUES ('schema','1')").run();
     privateDir(join(this.root, 'artifacts'));
+  }
+  hasTable(table: string): boolean {
+    invariant(TABLES.has(table), 'Unknown table');
+    return !!this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
   }
   close(): void { this.db.close(); }
   tx<T>(fn: () => T): T {

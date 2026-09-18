@@ -1,7 +1,7 @@
 import { existsSync, realpathSync, lstatSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { loadConfig, configPath, repoHome, getKey, repoId, statePath } from './config.ts';
-import { setup, trustRepository } from './setup.ts';
+import { setup, setupModels, trustRepository } from './setup.ts';
 import { detectAll } from './adapters/registry.ts';
 import { Store } from './storage.ts';
 import { Engine, startRun } from './engine.ts';
@@ -21,7 +21,8 @@ export const HELP = `jvo · Jev Orchestrator
   jvo                           対話開始（初回は設定）
   jvo "タスク"                  タスクを開始
   jvo run "タスク" --json        非対話実行・JSONイベント
-  jvo setup                     Jevキー / CLI選択・版の再承認
+  jvo setup                     Jevキー / CLI別モデル複数選択・版の再承認
+  jvo models                    CLI別の許可モデルを複数選択（キー再入力なし）
   jvo trust                     リポジトリ・検証コマンドの承認
   jvo doctor                    安全なCLI検出（課金・ログインなし）
   jvo agents                    登録したprofile
@@ -29,6 +30,7 @@ export const HELP = `jvo · Jev Orchestrator
   jvo resume [run-id]            再接続・再開
   jvo recover [run-id] --acknowledge   不明な副作用の明示照合
   jvo replay [run-id]            記録のみ表示（API・CLI実行なし）
+  jvo messages [run-id]          担当間の質問・返答を記録から表示（読取専用）
   jvo metrics [run-id]           保存済みrunの使用量・再開率を出力（読取専用）
   jvo export-eval [run-id]       保存済みの判断入力を評価用に出力（読取専用）
   jvo eval dataset.json --allow-api   操作なしのJev比較評価（API課金あり）
@@ -62,11 +64,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === '__supervise') { invariant(args[1] && args[2], 'Missing supervisor arguments'); await supervise(args[1], args[2]); return; }
   const f = flags(args), command = f.positional[0];
   if (f.flags.has('help') || command === 'help' || command === '-h') { console.log(HELP); return; }
-  if (f.flags.has('version') || command === '-v') { console.log('0.1.0'); return; }
+  if (f.flags.has('version') || command === '-v') { console.log('0.2.0'); return; }
   if (command === 'demo') { await demo(f.flags.has('json') || !process.stdin.isTTY); return; }
   // Replay opens only an existing database in read-only mode. It never runs Git,
   // loads a provider key, creates directories, starts a supervisor, or executes a worker.
-  if (command === 'replay' || command === 'export-eval' || command === 'metrics') {
+  if (command === 'replay' || command === 'export-eval' || command === 'metrics' || command === 'messages') {
     let repo = realpathSync(process.cwd());
     for (;;) {
       if (existsSync(join(repo, '.git')) && !lstatSync(join(repo, '.git')).isSymbolicLink()) break;
@@ -76,7 +78,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     try {
       const run = selectRun(store, f.positional[1]); invariant(run.repo === repo, 'Recorded repository identity does not match');
       const decisions = store.all<Decision>('decisions', run.id);
-      if (command === 'metrics') {
+      if (command === 'messages') { console.log(JSON.stringify(store.hasTable('messages') ? store.all('messages', run.id) : [], null, 2)); }
+      else if (command === 'metrics') {
         const attempts = store.all<{ invocation: { role: string; resume?: string; cwd: string } }>('attempts', run.id), workers = attempts.filter(a => a.invocation.role === 'implementer');
         console.log(JSON.stringify({ runId: run.id, status: run.status, activeMilliseconds: run.activeMs ?? 0, usage: summarizeUsage(store.all<Usage>('usage', run.id)), acceptedTasks: store.all<Task>('tasks', run.id).filter(t => t.kind === 'work' && t.staged && t.snapshot).length, implementationStarts: workers.length, resumedStarts: workers.filter(a => a.invocation.resume).length, decisionCalls: run.decisionCalls, workerStarts: run.workerStarts, independentlyValidatedQuality: null, note: 'Only observed usage is totaled. A ready run is not independent proof of correctness. Include failed runs when comparing aggregate cost.' }, null, 2));
       } else if (command === 'export-eval') {
@@ -86,7 +89,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
   let config = loadConfig();
-  if (command === 'setup') { await setup(config); return; }
+  if (command === 'setup') { if (f.flags.has('models')) await setupModels(config); else await setup(config); return; }
+  if (command === 'models') { if (f.flags.has('json')) console.log(JSON.stringify(config.profiles, null, 2)); else await setupModels(config); return; }
   if (command === 'config') { console.log(configPath()); return; }
   if (command === 'doctor') { console.log(JSON.stringify({ node: process.version, platform: process.platform, config: configPath(), agents: await detectAll(), note: 'Detection only. Authentication and live protocol compatibility are not assumed.' }, null, 2)); return; }
   if (command === 'agents') { console.log(JSON.stringify(config.profiles, null, 2)); return; }

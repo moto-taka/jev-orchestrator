@@ -11,6 +11,7 @@ export function configPath(): string { return join(home(), 'config.json'); }
 export function defaults(): Config {
   return {
     version: 1,
+    messaging: { enabled: true, maxMessages: 64, maxTurnsPerTask: 4, ttlMs: 1_800_000 },
     decision: { provider: 'typesafe', model: 'jev-latest', transport: 'http', timeoutMs: 30_000, retries: 2, immutableModel: false, keyStore: 'environment', gatewayOptions: {} },
     runtime: { maxParallel: 3, maxRepairs: 3, maxSameFailure: 2, maxWorkerStarts: 40, maxDecisions: 200, maxRunMs: 7_200_000, maxTasks: 24, maxLogBytes: 8_000_000 },
     thresholds: { route: 0.5, accept: 0.8, highRiskAccept: 0.9, evidence: 0.8 },
@@ -36,7 +37,11 @@ export function validateConfig(value: unknown): Config {
   }
   for (const [key, max] of Object.entries({ maxParallel: 16, maxRepairs: 20, maxSameFailure: 20, maxWorkerStarts: 1000, maxDecisions: 10_000, maxRunMs: 86_400_000, maxTasks: 100, maxLogBytes: 100_000_000 })) integer(rt[key], key, 1, max);
   for (const key of ['route', 'accept', 'highRiskAccept', 'evidence']) invariant(typeof th[key] === 'number' && th[key] >= 0 && th[key] <= 1, `Invalid ${key} threshold`);
-  invariant(Array.isArray(c.profiles) && c.profiles.length <= 64, 'Invalid profiles');
+  if (c.messaging !== undefined) {
+    const m = object(c.messaging); invariant(typeof m.enabled === 'boolean', 'Invalid messaging enablement');
+    integer(m.maxMessages, 'message budget', 2, 256); integer(m.maxTurnsPerTask, 'conversation checkpoints', 1, 20); integer(m.ttlMs, 'message TTL', 1000, 86_400_000);
+  }
+  invariant(Array.isArray(c.profiles) && c.profiles.length <= 256, 'Invalid profiles');
   const ids = new Set<string>();
   for (const p of c.profiles) {
     validateProfile(p);
@@ -52,6 +57,12 @@ function validateProfile(value: unknown): void {
   invariant(['codex', 'claude', 'pi', 'opencode'].includes(text(p.adapter)), 'Invalid adapter');
   invariant(isAbsolute(text(p.binary)) && !text(p.binary).includes('\0'), 'Profile executable must be absolute');
   text(p.version); text(p.capabilityHash);
+  for (const k of ['globalPiProviders', 'reasoning']) if (p[k] !== undefined) invariant(typeof p[k] === 'boolean', `Invalid ${k}`);
+  if (p.globalPiProviders) invariant(p.adapter === 'pi', 'Global Pi providers only apply to Pi');
+  if (p.modelName !== undefined) text(p.modelName, 'model name', 300);
+  if (p.modelDescription !== undefined) text(p.modelDescription, 'model description', 2000);
+  if (p.modelSource !== undefined) invariant(['cli','saved','alias'].includes(String(p.modelSource)), 'Invalid model source');
+  if (p.contextWindow !== undefined) integer(p.contextWindow, 'context window', 1, 100_000_000);
   if (p.tier !== undefined) invariant(['fast', 'standard', 'deep', 'review'].includes(String(p.tier)), 'Invalid profile tier');
   invariant(Array.isArray(p.roles) && p.roles.length > 0 && p.roles.every(r => ['scout', 'planner', 'implementer', 'reviewer', 'explainer'].includes(r)), 'Invalid profile roles');
   invariant(['managed', 'trusted-local', 'assisted', 'unavailable'].includes(text(p.level)) && typeof p.enabled === 'boolean', 'Invalid management level');

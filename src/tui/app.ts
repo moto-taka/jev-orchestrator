@@ -43,7 +43,7 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
     try {
       if (text.startsWith('/')) {
         const space = text.indexOf(' '), command = space < 0 ? text : text.slice(0, space), arg = space < 0 ? '' : text.slice(space + 1);
-        if (['/agents', '/tasks', '/why', '/usage', '/help'].includes(command)) { state.panel = state.panel === command ? '' : command; }
+        if (['/agents', '/tasks', '/why', '/messages', '/usage', '/help'].includes(command)) { state.panel = state.panel === command ? '' : command; }
         else {
           const result = await actions.command(command, arg);
           if (result.view) view = result.view; state.notice = result.notice;

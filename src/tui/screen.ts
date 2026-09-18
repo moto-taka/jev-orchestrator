@@ -28,13 +28,13 @@ export function wrap(s: string, width: number): string[] {
   return out;
 }
 export interface ScreenState { input: string; cursor: number; panel: string; scroll: number; notice?: string; detail?: string; demo?: boolean; }
-export const COMMANDS = ['/agents', '/tasks', '/diff', '/why', '/usage', '/pause', '/resume', '/apply', '/recover', '/refresh', '/cancel', '/detach', '/help', '/exit'];
-const labels: Record<string, string> = { running: '実行中', paused: '一時停止', blocked: '確認待ち', ready_for_user_apply: '反映待ち', applied: '反映済み', cancelled: '取消済み', queued: '待機', reported: '報告済み', reviewing: 'レビュー中', verifying: '検証中', accepted: '承認済み', done: '完了', rework: '修正中', staging: '統合中' };
+export const COMMANDS = ['/agents', '/tasks', '/diff', '/why', '/messages', '/usage', '/pause', '/resume', '/apply', '/recover', '/refresh', '/cancel', '/detach', '/help', '/exit'];
+const labels: Record<string, string> = { running: '実行中', paused: '一時停止', blocked: '確認待ち', ready_for_user_apply: '反映待ち', applied: '反映済み', cancelled: '取消済み', queued: '待機', waiting_for_peer: '担当の返答待ち', reported: '報告済み', reviewing: 'レビュー中', verifying: '検証中', accepted: '承認済み', done: '完了', rework: '修正中', staging: '統合中' };
 const number = (v?: number) => v === undefined ? '不明' : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
 export function renderScreen(view: View | undefined, state: ScreenState, columns: number, rows: number): { lines: string[]; cursor: { row: number; column: number } } {
   const width = Math.max(20, columns - 2), height = Math.max(8, rows), run = view?.run;
   const lines: string[] = [];
-  lines.push(`  ▐▛██▜▌  jvo  0.1.0${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
+  lines.push(`  ▐▛██▜▌  jvo  0.2.0${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
   lines.push(`  ▝▜██▛▘  ${run ? basename(run.repo) : 'Jev Orchestrator'}  ·  ${run ? state.demo ? 'DEMO fixture / 本番API未使用' : `${run.config.decision.provider} / ${run.config.decision.model}` : '判断はJev、作業はお使いのCLIへ。'}`);
   lines.push(`    ▘▘    ${run ? `${labels[run.status] ?? run.status}  ·  ${run.id.slice(0, 16)}` : 'タスクを入力してください。 /help で操作を確認できます。'}`);
   lines.push('');
@@ -44,8 +44,8 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
     if (state.panel === '/agents') {
       for (const [i, p] of (view?.agents ?? []).entries()) {
         const active = view?.tasks.filter(t => t.activeProfileId === p.id && ['running', 'reviewing'].includes(t.status)) ?? [];
-        content.push(`  ${i === (view?.agents.length ?? 0) - 1 ? '└─' : '├─'} ${p.id} · ${p.adapter} · ${p.model ?? 'CLI既定モデル（未観測）'}`);
-        content.push(`     ${p.enabled ? '有効' : '無効'} / ${p.tier ?? 'standard'} / ${p.level} / ${p.version}`);
+        content.push(`  ${i === (view?.agents.length ?? 0) - 1 ? '└─' : '├─'} ${p.id} · ${p.adapter} · ${p.provider ? p.provider + '/' : ''}${p.model ?? 'CLI既定モデル（未観測）'}`);
+        content.push(`     ${p.enabled ? '有効' : '無効'} / ${p.tier ?? '役割はJevが選択'} / ${p.level} / ${p.version}`);
         content.push(`     ${active.length ? active.map(t => t.spec.title).join(' · ') : '待機'} · ${p.roles.join(', ')}`);
       }
     } else if (state.panel === '/tasks') {
@@ -57,6 +57,16 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
         content.push(`     根拠 ${d.evidenceIds.length}件 · ${d.semanticHash.slice(0, 12)} · ${d.provider}`);
       }
       content.push('', '  confidenceは正解率ではありません。記録された選択と根拠を表示しています。');
+    } else if (state.panel === '/messages') {
+      const states: Record<string, string> = { proposed: 'Jev判断待ち', queued: '配送待ち', submitted: '入力済み・完了未確認', answered: '返答を保存', closed: '応答・継続済み', rejected: '配送拒否', unknown: '配送状態不明' };
+      for (const m of view?.messages ?? []) {
+        const name = (id: string) => view?.tasks.find(t => t.id === id)?.spec.id ?? id;
+        content.push(`  ${name(m.fromTaskId)} → ${name(m.toTaskId)} · ${m.kind === 'question' ? '質問' : '返答'} · ${states[m.status]}`);
+        content.push(...m.body.split('\n').slice(0, 8).map(line => `     ${line}`));
+        content.push(`     ${m.id} · snapshot ${m.snapshot.slice(0, 10)}`);
+      }
+      if (!view?.messages?.length) content.push('  エージェント間のメッセージはまだありません。');
+      content.push('', '  jvo内蔵通信です。会話の一致はタスクの完了承認ではありません。');
     } else if (state.panel === '/usage') {
       const usage = summarizeUsage(view?.usage ?? []);
       content.push(`  入力token（観測分）       ${number(usage.input)}`, `  出力token（観測分）       ${number(usage.output)}`,
@@ -71,6 +81,7 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
       '  通常入力: 新規タスク / 停止中なら要件を補足して再開',
       '  /agents  担当CLI    /tasks  タスクと作業場',
       '  /diff    統合差分   /why    Jevの判断記録',
+      '  /messages  担当間の質問・返答と配送状態',
       '  /usage   使用量     /pause  停止・作業は保持',
       '  /resume  再開       /apply  検証済み成果物を反映',
       '  /recover 不明な副作用の照合（確認が必要）',
@@ -109,7 +120,7 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
   const cursorRow = lines.length + 1;
   lines.push(`❯ ${input}`);
   lines.push('─'.repeat(width));
-  const matches = state.input.startsWith('/') ? COMMANDS.filter(c => c.startsWith(state.input.split(' ')[0]!)).join('  ') : '/agents  /tasks  /diff  /why  /usage   ·   Tabで補完';
+  const matches = state.input.startsWith('/') ? COMMANDS.filter(c => c.startsWith(state.input.split(' ')[0]!)).join('  ') : '/agents  /tasks  /messages  /diff  /why  /usage   ·   Tabで補完';
   lines.push(fit(`  ${matches}`, width));
   lines.push(fit('  Jev decides. Your CLIs build.  ·  元の作業場への反映は /apply', width));
   return { lines: lines.slice(0, height).map(s => fit(s, width)), cursor: { row: Math.min(height, cursorRow), column: 3 + cellWidth(chars.slice(offset, state.cursor).join('').replace(/\n/g, ' ↵ ')) } };

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import type { AgentAdapter, Candidate, Config, Decision, DecisionProvider, Evaluation, Evidence, Invocation, Json, Operation, Profile, Question, Role, Run, Task, TaskSpec, Trust, View, WorkerReport } from './types.ts';
+import type { AgentAdapter, Candidate, Config, Decision, DecisionProvider, Evaluation, Evidence, Invocation, Json, Operation, Profile, Question, Role, Run, PeerMessage, Task, TaskSpec, Trust, View, WorkerReport } from './types.ts';
 import { Store } from './storage.ts';
 import { Workspaces, assertChanges, changedPaths, dirty, fingerprint, git, repository } from './workspaces.ts';
 import { canonical, clip, errorText, hash, id, invariant, json, now, privateDir, safeChild } from './util.ts';
@@ -12,6 +12,7 @@ import { validateGraph, REPORT_CONTRACT } from './contracts.ts';
 import { QUESTION_VERSION, assessmentQuestions, choiceQuestion, evidenceQuestions } from './decision/questions.ts';
 import { withRetries } from './decision/provider.ts';
 import { evidencePack, relevanceQuestions, repositoryContext, skillContext } from './context.ts';
+import { Mailbox, parsePeerReplies } from './messaging/mailbox.ts';
 import { NativeAdapter } from './adapters/native.ts';
 
 export interface StartOptions { baseline?: 'head' | string[]; mode?: 'worktree' | 'in-place'; }
@@ -53,6 +54,7 @@ export class Engine extends EventEmitter {
     this.resourceStore = options.resourceStore ?? store; this.adapter = options.adapter ?? new NativeAdapter(this.guard); this.ws = new Workspaces(store.root, store.run(runId).repo);
   }
   get run(): Run { return this.store.run(this.runId); }
+  get mailbox(): Mailbox { return new Mailbox(this.store, this.runId, this.guard); }
   get tasks(): Task[] { return this.store.all<Task>('tasks', this.runId); }
   notify(): void { this.changeCounter++; this.emit('change'); }
   view(): View {
@@ -61,7 +63,7 @@ export class Engine extends EventEmitter {
     const visibleRun = { ...source, trust, config: { ...source.config, trusts: {} } };
     const visibleTasks = this.tasks.map(t => ({ ...t, evidence: t.evidence.map(e => ({ ...e, excerpt: '' })), lastReport: t.lastReport ? { summary: t.lastReport.summary.slice(0, 1000), claims: [], questions: t.lastReport.questions.slice(0, 5) } : undefined,
       proposedPlan: undefined, findings: t.findings.slice(-10).map(f => ({ ...f, evidence: f.evidence.slice(0, 1000) })) }));
-    return { run: visibleRun, tasks: visibleTasks, agents: source.config.profiles, usage: this.store.all('usage', this.runId),
+    return { messages: this.mailbox.all().map(m => ({ ...m, body: clip(m.body, 2000).text })), run: visibleRun, tasks: visibleTasks, agents: source.config.profiles, usage: this.store.all('usage', this.runId),
       decisions: this.store.all<Decision>('decisions', this.runId).slice(-100), events: this.store.events(this.runId, 200).filter(e => typeof e.data.text === 'string' && e.data.text.length > 0).map(e => ({ time: e.time, kind: e.kind, taskId: typeof e.data.taskId === 'string' ? e.data.taskId : undefined, text: terminalText(String(e.data.text)) })) };
   }
   log(kind: string, text: string, taskId?: string): void { this.store.event(this.runId, kind, { text: this.guard.redact(terminalText(text)).slice(0, 5000), taskId }); this.notify(); }
@@ -75,8 +77,10 @@ export class Engine extends EventEmitter {
       let launched = false;
       for (const task of this.tasks) {
         if (this.active.size >= max) break;
-        if (task.phase === 'done' || task.phase === 'blocked' || this.active.has(task.id)) continue;
-        if (!task.spec.dependsOn.every(dep => this.store.task(dep).staged)) continue;
+        if (this.active.has(task.id)) continue;
+        const peerWork = this.mailbox.actionable(task);
+        if (!peerWork && (task.phase === 'done' || task.phase === 'blocked' || this.mailbox.waiting(task))) continue;
+        if (!peerWork && !task.spec.dependsOn.every(dep => this.store.task(dep).staged)) continue;
         if (task.kind !== 'conflict' && (task.phase === 'stage' || task.kind === 'integration') && this.tasks.some(t => t.kind === 'conflict' && !t.staged)) continue;
         const resources = this.resources(task);
         if (!this.resourceStore.lease(resources, task.id, this.runId, 60_000)) continue;
@@ -111,6 +115,8 @@ export class Engine extends EventEmitter {
       invariant(op?.state === 'pending', 'An interrupted operation has unknown side effects. Use jvo recover after checking the process and worktree.');
       await this.executeOperation(op, signal); return;
     }
+    const peerCandidates = this.peerCandidates(task);
+    if (peerCandidates) { await this.selectAndRun(task, peerCandidates, {}, signal); return; }
     if (task.phase === 'verify') {
       if (task.kind === 'integration') {
         const current = await git(this.run.integration, ['rev-parse', 'HEAD']);
@@ -154,8 +160,12 @@ export class Engine extends EventEmitter {
     }
     task = this.store.task(taskId);
     const candidates = this.candidates(task, assessments);
+    await this.selectAndRun(task, candidates, assessments, signal);
+  }
+  private async selectAndRun(task: Task, candidates: Candidate[], assessments: Record<string, unknown>, signal: AbortSignal): Promise<void> {
+    const taskId = task.id;
     const refs = this.store.refs(task);
-    const { evaluation, source, decisionId, fresh, stateHash, questionHash } = await this.evaluate(task, json({ ...this.state(task) as Record<string, Json>, checks: assessments, candidates }), choiceQuestion(task, candidates), signal, false);
+    const { evaluation, source, decisionId, fresh, stateHash, questionHash } = await this.evaluate(task, json({ ...this.state(task) as Record<string, Json>, checks: assessments, candidates, peerMessages: [...new Set(candidates.flatMap(c => c.messageIds ?? []))].map(id => this.mailbox.get(id)) }), choiceQuestion(task, candidates), signal, false);
     if (!fresh) return;
     const answer = evaluation.answers.action; invariant(answer?.kind === 'choice', 'Jev did not choose an action');
     const chosen = candidates.find(c => c.id === answer.selected); invariant(chosen, 'Jev selected an unknown action');
@@ -171,9 +181,95 @@ export class Engine extends EventEmitter {
     const committed = this.store.commitDecision(record, outcome === 'execute' ? op : undefined);
     if (outcome === 'abstain') { this.store.updateRun(this.runId, { status: 'blocked', blockReason: 'Jev selection support is below the policy threshold; supply additional evidence. No automatic reroll.' }); this.log('abstain', '判断の確実性が不足しています。証拠を追加するか、設定を確認してください。', taskId); return; }
     if (committed) {
-      const labels: Record<string, string> = { START_TASK: '実装を依頼', REQUEST_SCOUT: '調査を依頼', REQUEST_PLAN: '計画案を依頼', ACCEPT_PLAN: '計画案を採用', REQUEST_EVIDENCE: '不足する根拠の確認を依頼', REQUEST_REVIEW: '独立レビューを依頼', REWORK_SAME_SESSION: '同じセッションへ修正を依頼', REASSIGN_TASK: '担当変更を選択', ACCEPT_TASK: '現在の検証結果を承認', STAGE_INTEGRATION: '統合作業場への反映を承認', ASK_USER: '利用者へ確認', PAUSE: '一時停止', CANCEL: '取消し' };
+      const labels: Record<string, string> = { DELIVER_MESSAGE: 'エージェント間の配送を承認', REJECT_MESSAGE: 'メッセージを拒否', ANSWER_PEER: '担当者の回答を依頼', CONTINUE_AFTER_PEER: '返答を元セッションへ追加', START_TASK: '実装を依頼', REQUEST_SCOUT: '調査を依頼', REQUEST_PLAN: '計画案を依頼', ACCEPT_PLAN: '計画案を採用', REQUEST_EVIDENCE: '不足する根拠の確認を依頼', REQUEST_REVIEW: '独立レビューを依頼', REWORK_SAME_SESSION: '同じセッションへ修正を依頼', REASSIGN_TASK: '担当変更を選択', ACCEPT_TASK: '現在の検証結果を承認', STAGE_INTEGRATION: '統合作業場への反映を承認', ASK_USER: '利用者へ確認', PAUSE: '一時停止', CANCEL: '取消し' };
       this.log('decision', `${labels[chosen.kind] ?? chosen.kind} · ${chosen.profileId ?? task.spec.id}`, taskId); await this.executeOperation(op, signal);
     }
+  }
+  /** Only communication checkpoints bypass dependency readiness; they cannot edit. */
+  private peerCandidates(task: Task): Candidate[] | undefined {
+    const box = this.mailbox; if (!box.enabled) return undefined;
+    const outgoing = box.outgoing(task)[0], incoming = box.questions(task)[0], answers = box.readyAnswers(task);
+    const list: Candidate[] = [];
+    const add = (kind: Candidate['kind'], reason: string, messages: PeerMessage[], profileId?: string, sessionId?: string) => {
+      const c = { kind, reason, messageIds: messages.map(m => m.id), taskId: task.id, profileId, sessionId, workspace: task.workspace, evidenceIds: task.evidence.map(e => e.id) };
+      list.push({ ...c, id: `C_${hash(c).slice(0, 14)}` });
+    };
+    if (outgoing) {
+      box.assertFresh(outgoing);
+      add('DELIVER_MESSAGE', 'Deliver this relevant, scoped peer message without altering task scope or accepting work. This is the only path to the addressed peer.', [outgoing]);
+      add('REJECT_MESSAGE', 'Reject irrelevant, unsafe or out-of-scope communication and request user clarification. Do not pretend a reply was received.', [outgoing]);
+    } else if (incoming) {
+      box.assertFresh(incoming);
+      const profiles = task.profileId && task.sessionId ? this.profiles('explainer').filter(p => p.id === task.profileId) : this.profiles('explainer');
+      for (const profile of profiles) add('ANSWER_PEER', 'Answer the queued question as this task\'s read-only peer. Use the existing assigned model/session when available; do not edit, accept work, or start another task.', [incoming], profile.id, profile.id === task.profileId ? task.sessionId : undefined);
+    } else if (answers.length) {
+      for (const m of answers) box.assertFresh(m);
+      const outstanding = box.all().filter(m => m.kind === 'question' && m.fromTaskId === task.id && !['closed', 'rejected'].includes(m.status));
+      if (outstanding.some(q => !answers.some(a => a.replyTo === q.id))) return undefined;
+      if (task.sessionId && this.profiles('implementer').some(p => p.id === task.profileId)) add('CONTINUE_AFTER_PEER', 'Append only these Jev-approved replies to the original implementation session, preserving its model and workspace. Continue work; the ordinary tests and independent review are still mandatory.', answers, task.profileId, task.sessionId);
+    } else return undefined;
+    add('ASK_USER', 'Pause for clarification of the peer conversation or unavailable session/model. Never silently replace the original session.', []);
+    add('PAUSE', 'Pause communication and preserve the files and message history.', []);
+    return list;
+  }
+  private async peerOperation(task: Task, op: Operation, signal: AbortSignal, complete: (update?: Partial<Task>) => unknown): Promise<void> {
+    const c = op.candidate, box = this.mailbox;
+    invariant(box.enabled && c.messageIds?.length, 'Peer messaging is disabled or no message was selected');
+    const messages = c.messageIds.map(id => box.get(id));
+    for (const m of messages) {
+      box.assertFresh(m);
+      await this.ensureSnapshot(this.store.task(m.kind === 'question' ? m.fromTaskId : m.toTaskId));
+    }
+    if (c.kind === 'DELIVER_MESSAGE' || c.kind === 'REJECT_MESSAGE') {
+      invariant(messages.length === 1, 'Deliver one semantic message per Jev decision'); const m = messages[0]!;
+      invariant(m.fromTaskId === task.id && m.status === 'proposed', 'Message was already routed or sender mismatched');
+      this.store.tx(() => { box.update(m.id, { status: c.kind === 'DELIVER_MESSAGE' ? 'queued' : 'rejected', decisionId: op.decisionId }); complete(); });
+      this.log('peer.route', `${task.spec.id} → ${this.store.task(m.toTaskId).spec.id} · ${c.kind === 'DELIVER_MESSAGE' ? '配送待ち' : '配送拒否'}`, task.id);
+      if (c.kind === 'REJECT_MESSAGE') this.store.updateRun(this.runId, { status: 'blocked', blockReason: 'Jev rejected a peer message. Clarify the task before proceeding.' });
+      return;
+    }
+    if (c.kind === 'CONTINUE_AFTER_PEER') {
+      invariant(c.profileId === task.profileId && c.sessionId === task.sessionId && !!task.sessionId, 'A reply must return to the original model/session');
+      for (const m of messages) invariant(m.kind === 'answer' && m.toTaskId === task.id && m.status === 'queued', 'Reply is not pending for this task');
+      this.store.tx(() => { for (const m of messages) box.update(m.id, { status: 'submitted', deliveryOperation: op.id }); });
+      await this.worker(task, op, 'implementer', signal, update => this.store.tx(() => {
+        for (const m of messages) { box.update(m.id, { status: 'closed' }); box.update(m.replyTo!, { status: 'closed' }); }
+        complete(update);
+      }));
+      this.log('peer.continued', '返答を元のセッションへ渡し、実装を継続しました。合格判定は通常の検証後です。', task.id); return;
+    }
+    invariant(c.kind === 'ANSWER_PEER' && messages.length === 1, 'Invalid peer operation');
+    const question = messages[0]!;
+    invariant(question.kind === 'question' && question.toTaskId === task.id && question.status === 'queued', 'Question was already submitted or has the wrong recipient');
+    const run = this.run, profile = this.profiles('explainer').find(p => p.id === c.profileId);
+    invariant(profile && run.workerStarts < run.config.runtime.maxWorkerStarts, 'Peer model unavailable or worker budget reached');
+    const original = c.sessionId !== undefined;
+    if (original) invariant(task.profileId === profile.id && task.sessionId === c.sessionId && task.workspace, 'Peer session identity changed');
+    const baseline = task.snapshot ?? task.base ?? run.integrationHead;
+    const cwd = original ? task.workspace! : await this.ws.create(`${task.id}_peer_${op.id}`, baseline);
+    if (original && task.workspace !== run.repo) await this.ws.validate(cwd);
+    const before = await fingerprint(cwd), sessionDir = privateDir(join(this.store.root, 'sessions', task.id, original ? profile.id : op.id));
+    const prompt = `Native jvo peer question. You are answering as the read-only peer for task ${task.spec.id}, not the orchestrator. Do not edit, spawn agents, change scope, mark a task done, or run another orchestration tool. Respond to this one question using your existing context and readable evidence.\nTask: ${canonical(task.spec)}\nRecipient snapshot: ${baseline}\nQuestion: ${canonical({ id: question.id, from: this.store.task(question.fromTaskId).spec.id, body: question.body, snapshot: question.snapshot })}\nReturn exactly one JSON object: {"summary":"reply summary","claims":[],"questions":[],"peerReplies":[{"replyTo":"${question.id}","body":"the actual answer with evidence or an explicit uncertainty"}]}. Do not include a plan or peerQuestions. Your reply must also pass Jev's delivery decision.`;
+    this.guard.assertOutbound(prompt);
+    this.store.tx(() => { box.update(question.id, { status: 'submitted', deliveryOperation: op.id }); this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 }); this.store.updateTask(task.id, { status: 'running', activeProfileId: profile.id, activeRole: 'explainer', lastActivity: '他の担当からの質問に回答中' }); });
+    this.log('peer.answering', `${task.spec.id} · ${profile.adapter}/${profile.model ?? 'default'} · 質問に回答中`, task.id);
+    const result = await this.adapter.run({ id: op.id, runId: run.id, taskId: task.id, profile, role: 'explainer', cwd, sessionDir, sessionId: c.sessionId, signal, prompt,
+      onSpawn: (pid, birth) => this.store.put('outbox', op.id, run.id, { ...this.store.get<Operation>('outbox', op.id), pid, birth }),
+      onEvent: e => { if (e.type === 'tool') this.log('peer.tool', this.guard.redact(terminalText(e.text ?? '')).slice(0, 500), task.id); } });
+    this.store.put('attempts', op.id, run.id, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, role: 'explainer', cwd, resume: c.sessionId, snapshot: baseline, promptHash: hash(prompt), messageId: question.id }, result: JSON.parse(this.guard.redact(canonical(result))) });
+    for (const [n, u] of result.usage.entries()) this.store.usage(`${op.id}:${n}`, run.id, u);
+    if (!result.usage.length) this.store.usage(`${op.id}:unknown`, run.id, { basis: 'unavailable' });
+    invariant(await fingerprint(cwd) === before, 'Peer answering modified a read-only workspace; reject the reply and inspect the changes');
+    invariant(result.status === 'reported' && result.report, 'Peer reply outcome is not confirmed; recovery is required before retrying');
+    if (original) {
+      invariant(!result.sessionId || result.sessionId === c.sessionId, 'Peer silently changed its session');
+      invariant(!task.observedModel || !result.model || task.observedModel === result.model, 'Peer silently changed its model');
+    }
+    invariant(!result.report.peerQuestions?.length && !result.report.plan?.length, 'A reply cannot delegate or redefine tasks');
+    const replies = parsePeerReplies(result.report.peerReplies ?? []);
+    invariant(replies.length === 1 && replies[0]!.replyTo === question.id, 'Peer did not provide the requested correlated reply');
+    this.store.tx(() => { box.reply(question, task, op.id, profile.id, replies[0]!); complete({ status: task.status }); });
+    this.log('peer.answered', `${task.spec.id} → ${this.store.task(question.fromTaskId).spec.id} · 返答を保存、Jevの配送判断待ち`, task.id);
   }
   private state(task: Task): Json {
     const run = this.run;
@@ -183,6 +279,7 @@ export class Engine extends EventEmitter {
       profile: task.profileId, sessionAvailable: !!task.sessionId, reviews: task.reviewCount, requiredReviews: task.requiredReviews,
       testsPassed: task.testsPassed, testedSnapshot: task.testedSnapshot, reviewedSnapshot: task.reviewedSnapshot,
       evidence: pack, findings: task.findings, proposedPlan: task.proposedPlan, lastFailure: task.lastFailure, sameFailure: task.sameFailure,
+      peerMessageCounts: { outgoing: this.mailbox.outgoing(task).length, incoming: this.mailbox.questions(task).length },
       profiles: run.config.profiles.filter(p => p.enabled).map(({ binary: _binary, ...profile }) => profile), context: task.contextIds.map(h => this.store.readArtifact(h)),
       remainingStarts: run.config.runtime.maxWorkerStarts - run.workerStarts,
       remainingDecisions: run.config.runtime.maxDecisions - run.decisionCalls });
@@ -268,7 +365,7 @@ export class Engine extends EventEmitter {
     return list;
   }
   private acceptable(task: Task): boolean {
-    return !!task.snapshot && task.testsPassed === true && task.testedSnapshot === task.snapshot && task.reviewedSnapshot === task.snapshot && task.reviewCount >= task.requiredReviews;
+    return !this.mailbox.waiting(task) && !!task.snapshot && task.testsPassed === true && task.testedSnapshot === task.snapshot && task.reviewedSnapshot === task.snapshot && task.reviewCount >= task.requiredReviews;
   }
   private async executeOperation(op: Operation, signal: AbortSignal): Promise<void> {
     invariant(this.run.status === 'running' && !signal.aborted, 'Run is not running');
@@ -290,6 +387,9 @@ export class Engine extends EventEmitter {
       this.store.event(this.runId, 'operation.completed', { taskId: task.id, action: c.kind, operation: op.id });
     });
     try {
+      if (['DELIVER_MESSAGE', 'REJECT_MESSAGE', 'ANSWER_PEER', 'CONTINUE_AFTER_PEER'].includes(c.kind)) {
+        await this.peerOperation(task, op, signal, complete); return;
+      }
       if (c.reason === 'runtime.verify') { await this.verify(task, signal, op); complete(); return; }
       if (c.kind === 'ASK_USER' || c.kind === 'PAUSE' || c.kind === 'CANCEL') {
         complete(); this.store.updateRun(this.runId, { status: c.kind === 'CANCEL' ? 'cancelled' : c.kind === 'ASK_USER' ? 'blocked' : 'paused', blockReason: c.reason });
@@ -314,6 +414,10 @@ export class Engine extends EventEmitter {
     } catch (e) {
       const current = this.store.get<Operation>('outbox', op.id);
       if (current?.state !== 'done') {
+        for (const mid of c.messageIds ?? []) {
+          const message = this.mailbox.get(mid);
+          if (message.status === 'submitted') this.mailbox.update(mid, { status: 'unknown' });
+        }
         this.store.put('outbox', op.id, this.runId, { ...current, state: 'unknown', error: this.guard.redact(errorText(e)) });
         // The worktree is kept exactly as-is. Side effects cannot be guessed from an exception.
         this.log('operation.unknown', `作業状態を確認してください: ${errorText(e)}`, task.id);
@@ -374,19 +478,21 @@ export class Engine extends EventEmitter {
     if (writer) cwd = task.workspace!;
     else cwd = await this.ws.create(`${task.id}_${role}_${op.id}`, baseline);
     const beforeRead = !writer ? await fingerprint(cwd) : undefined;
-    const resume = writer && c.kind === 'REWORK_SAME_SESSION' ? task.sessionId : undefined;
+    const resume = writer && ['REWORK_SAME_SESSION', 'CONTINUE_AFTER_PEER'].includes(c.kind) ? task.sessionId : undefined;
     const affinity = hash({ profile, role, cwd, instructionVersion: run.instructionVersion });
     if (resume) invariant(task.sessionFingerprint === affinity && task.profileId === profile.id, 'Session affinity changed; select an explicit reassignment instead of corrupting cached context');
     const sessionDir = privateDir(join(this.store.root, 'sessions', task.id, writer ? profile.id : op.id));
     const context = task.contextIds.map(h => this.store.readArtifact(h)).join('\n\n');
     const pack = evidencePack(task.evidence, run.trust.maxEvidenceBytes, this.guard);
-    const prompt = resume ? `Continue task ${task.spec.id} in this same session and workspace.\nDo not repeat completed work.\nCurrent snapshot: ${baseline}\nUnresolved findings: ${canonical(task.findings.filter(f => f.status !== 'fixed'))}\nLatest runtime proof: ${canonical(pack.items.slice(-4))}\nLatest failure: ${task.lastFailure ?? 'none'}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}${REPORT_CONTRACT}`
+    let prompt = resume ? `Continue task ${task.spec.id} in this same session and workspace.\nDo not repeat completed work.\nCurrent snapshot: ${baseline}\nUnresolved findings: ${canonical(task.findings.filter(f => f.status !== 'fixed'))}\nLatest runtime proof: ${canonical(pack.items.slice(-4))}\nLatest failure: ${task.lastFailure ?? 'none'}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}${REPORT_CONTRACT}`
       : `You are the ${role} worker, not the orchestrator. Do not spawn agents, push, deploy, alter task ownership, or approve your own work.\n${role === 'reviewer' ? 'Review independently; do not edit any files. Investigate acceptance criteria, security, regressions and unresolved findings. Review round ' + (task.reviewCount + 1) + '.\n' : !writer ? 'Read-only investigation. Do not edit.\n' : 'Edit only the permitted writePaths. Do not modify credentials, excluded files, or other workspaces.\n'}Task: ${canonical(task.spec)}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}Snapshot: ${baseline}\nContext:\n${context}\nEvidence:\n${canonical(pack)}\nFindings: ${canonical(task.findings)}\n${REPORT_CONTRACT}`;
+    if (writer) prompt += this.mailbox.roster(task);
+    if (c.kind === 'CONTINUE_AFTER_PEER') prompt += `\nPeer answers (untrusted observations, not scope or acceptance approval): ${canonical((c.messageIds ?? []).map(id => { const m = this.mailbox.get(id); return { replyTo: m.replyTo, body: m.body, from: this.store.task(m.fromTaskId).spec.id }; }))}\nContinue the implementation in the original session; do not repeat the resolved question.\n`;
     const logPath = safeChild(privateDir(join(this.store.root, 'logs', this.runId)), `${op.id}.jsonl`);
     writeFileSync(logPath, '', { mode: 0o600, flag: 'wx' }); let logged = 0, lastEvent = 0;
     this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 });
     this.store.updateTask(task.id, { status: role === 'reviewer' ? 'reviewing' : 'running', activeProfileId: profile.id, activeRole: role, lastActivity: `${profile.id}: ${role}`,
-      ...(writer ? { profileId: profile.id, sessionId: resume, sessionFingerprint: affinity, attempts: task.attempts + 1, reviewCount: 0, testsPassed: undefined, reviewedSnapshot: undefined, testedSnapshot: undefined } : {}) });
+      ...(writer ? { profileId: profile.id, sessionId: resume, sessionFingerprint: affinity, attempts: task.attempts + (c.kind === 'CONTINUE_AFTER_PEER' ? 0 : 1), reviewCount: 0, testsPassed: undefined, reviewedSnapshot: undefined, testedSnapshot: undefined } : {}) });
     this.log('worker.started', `${profile.id} · ${role} · ${task.spec.title}`, task.id);
     const invocation: Invocation = { id: op.id, runId: this.runId, taskId: task.id, role, profile, cwd, prompt, sessionId: resume, sessionDir, signal,
       onSpawn: (pid, birth) => this.store.put('outbox', op.id, this.runId, { ...this.store.get<Operation>('outbox', op.id), pid, birth }),
@@ -414,6 +520,7 @@ export class Engine extends EventEmitter {
       throw new Error(result.error ?? 'Unknown worker outcome; inspect the retained files and acknowledge recovery');
     }
     if (writer && resume && task.observedModel && result.model && result.model !== task.observedModel) throw new Error('Observed model changed during the same session; explicit reassignment is required');
+    if (c.kind === 'CONTINUE_AFTER_PEER') invariant(result.status === 'reported' && result.report, 'Peer answer delivery did not produce a completed turn; reconcile before retrying');
     if (result.status !== 'reported' || !result.report) {
       const failure = this.guard.redact(result.error ?? `Worker ${result.status}`);
       const previous = this.store.task(task.id);
@@ -427,6 +534,8 @@ export class Engine extends EventEmitter {
       return;
     }
     const report = result.report;
+    invariant(!report.peerReplies?.length, 'Replies are only allowed in an explicit ANSWER_PEER turn');
+    invariant(writer || !report.peerQuestions?.length, 'Only implementation checkpoints can initiate peer questions');
     this.guard.assertOutbound(canonical(report));
     this.addEvidence(task.id, role === 'reviewer' ? 'review' : 'observation', baseline, canonical(report), `${profile.id}:${op.id}`, 'worker-claimed');
     if (writer) {
@@ -437,7 +546,13 @@ export class Engine extends EventEmitter {
       if (risk && task.requiredReviews < 2) this.store.updateTask(task.id, { requiredReviews: 2 });
       this.addEvidence(task.id, 'code-diff', snapshot, diff || '(no changes)', 'runtime', 'runtime-observed');
       const repeat = snapshot === task.snapshot ? task.sameFailure + 1 : task.sameFailure;
-      complete({ snapshot, observedModel: result.model ?? task.observedModel, sessionId: result.sessionId ?? this.store.task(task.id).sessionId, lastReport: report, phase: 'verify', status: 'reported', sameFailure: repeat });
+      this.store.tx(() => {
+        const questions = this.mailbox.propose({ ...task, snapshot }, op.id, snapshot, report);
+        complete({ snapshot, observedModel: result.model ?? task.observedModel, sessionId: result.sessionId ?? this.store.task(task.id).sessionId,
+          lastReport: report, phase: 'verify', status: questions.length ? 'waiting_for_peer' : 'reported', sameFailure: repeat,
+          peerTurns: (task.peerTurns ?? 0) + (questions.length ? 1 : 0) });
+      });
+      if (report.peerQuestions?.length) this.log('peer.waiting', '他の担当への質問を保存しました。Jevの配送判断を待っています。', task.id);
     } else if (role === 'planner') {
       invariant(report.plan?.length, 'Planner did not submit a task graph'); validateGraph(report.plan);
       complete({ proposedPlan: report.plan, lastReport: report, phase: 'plan-review', status: 'reported', diagnoses: task.diagnoses + 1 });
@@ -539,6 +654,7 @@ export class Engine extends EventEmitter {
     const patch: Partial<Run> = { status: 'running', blockReason: undefined, scopeVersion: this.run.scopeVersion + 1 };
     if (message?.trim()) {
       invariant(message.length <= 30_000, 'Clarification is too long');
+      this.mailbox.discard('User clarification superseded the pending peer conversation; re-propose under the new requirements.');
       patch.pendingMessage = [this.run.pendingMessage, message].filter(Boolean).join('\n');
       // A user change invalidates all accepted results; preserve work and re-review it.
       for (const task of this.tasks) if (task.kind !== 'integration' && task.snapshot) {
@@ -558,6 +674,7 @@ export class Engine extends EventEmitter {
     invariant(trust?.repo === run.repo && trust.shareCode && trust.allowLocalExecution, 'Current repository permissions are not approved');
     invariant(trust.tests.length > 0 || trust.allowNoTests, 'Approve verification commands before refreshing');
     invariant(next.profiles.some(p => p.enabled && p.roles.includes('implementer')) && next.profiles.some(p => p.enabled && p.roles.includes('reviewer')), 'Implementation and review profiles are required');
+    this.mailbox.discard('Approved configuration changed; peer messages must be re-proposed using current permissions.');
     const contextChanged = hash(trust.skills) !== hash(run.trust.skills);
     this.store.tx(() => {
       this.store.updateRun(run.id, { config: JSON.parse(canonical(next)), trust, status: 'paused', scopeVersion: run.scopeVersion + 1, finalSnapshot: undefined, blockReason: 'Approved configuration refreshed; /resume to revalidate retained work' });
@@ -582,6 +699,7 @@ export class Engine extends EventEmitter {
       if (task.workspace && task.workspace !== this.run.repo) await this.ws.validate(task.workspace);
       this.store.put('outbox', op.id, this.runId, { ...op, state: 'failed', error: 'Explicitly acknowledged uncertain side effects; next action still requires Jev' });
       this.store.updateTask(task.id, { activeOperation: undefined, phase: op.candidate.reason === 'runtime.verify' ? 'verify' : task.snapshot ? 'judge' : task.workspace ? 'implement' : 'assess', status: 'reported', reviewedSnapshot: undefined, testsPassed: undefined, blockReason: undefined });
+      if (op.candidate.messageIds?.length) this.mailbox.discard('Explicit recovery acknowledged uncertain delivery. Do not assume the answer was consumed.', op.candidate.messageIds.map(id => this.mailbox.get(id).threadId));
       this.resourceStore.release(task.id);
     }
     this.log('recovered', '保持された作業場を再利用します。未確認の成果物は自動承認しません。');

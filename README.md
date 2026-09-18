@@ -27,7 +27,7 @@ jvo setup
 
 Node.js 24はHomebrewが依存として用意します。既存CLIの認証は変更しません。固定commitからビルドし、インストール時にはJev APIへ接続しません。[更新・認証・検証範囲](docs/homebrew.md)
 
-macOS上で `brew tap`・`brew install`・`brew test` が成功しています（[検証run](https://github.com/moto-taka/jev-orchestrator/actions/runs/35309383943)、formula commit `6173583`）。CIでは認証済みcheckoutのローカルGitミラーを使用し、利用者のSSH認証そのものや実Jev APIを試験したわけではありません。
+初回のHomebrew対応はmacOS上で `brew tap`・`brew install`・`brew test` を検証済みです（[0.1.0の検証run](https://github.com/moto-taka/jev-orchestrator/actions/runs/35309383943)）。0.2.0の結果はリポジトリのActionsを確認してください。CIでは認証済みcheckoutのローカルGitミラーを使い、利用者のSSH認証そのものや実Jev APIは試験しません。
 
 ### ソース / npm経由
 
@@ -59,9 +59,24 @@ jvo demo --json
 
 デモは **DEMO** と表示し、判断とworkerだけをテスト専用fixtureに置き換えます。実APIへ自動的にフォールバックする経路はありません。
 
-## エージェント間の会話について
+## 許可モデルをCLIごとに複数選択
 
-現在はJevが報告・レビュー・差し戻しを仲介します。宛先付きの質問・返答・配送確認を持つpeer messagingや外部A2A Protocolはまだ実装していません。agmsg / Orca / Herdr / Pi Messengerを比較し、Jevによる進行制御を維持した[追加設計](docs/agent-messaging.md)を用意しています。Homebrew対応と混同しないよう、実装状況を分けています。
+0.2.0では、モデルIDや用途を一つずつ手入力する設定を廃止しました。CLIを選んだ後、そのCLIのモデル一覧でSpaceで複数チェックし、Enterで確定します。文字入力で検索、Ctrl+Aで表示中を全選択できます。**使ってよい集合は利用者が決め、モデルと役割の組み合わせはJevが実行時に決めます。**
+
+```sh
+brew update
+brew upgrade moto-taka/jev-orchestrator/jvo
+jvo --version   # 0.2.0
+jvo models      # APIキーを再入力せず、モデルの許可だけ変更
+```
+
+Piの同一モデル名でもproviderごとに別項目として保持し、既存のscoped modelsを初期選択の参考にします。グローバル拡張で登録したproviderの利用にも、明示許可で対応します。前回のモデル・役割固定は新しい一覧設定へ置き換えます。[取得方法・制約・既存runの更新](docs/models.md)
+
+## jvo自身のエージェント間通信
+
+0.2.0では、**agmsg・Orca・Herdrを使わず**、jvo内部で異なる担当の質問と返答を交換します。各workerが文章を書き、Jevが宛先・配送・回答モデル・続行を判断します。質問元のモデル/session/worktreeを保って返答だけを追加します。
+
+会話は同じrunの作業タスク間で、ターンの区切りに配送します。任意の外部端末への入力注入や、標準A2A ProtocolのネットワークAPIではありません。会話だけで合格にはならず、通常のテスト・独立レビュー・Jev承認を通します。`/messages` で配送状態と本文を確認できます。[内蔵通信の仕様・検証範囲](docs/agent-messaging.md)
 
 ## Jevの接続先
 
@@ -82,6 +97,7 @@ jvo run "バグを修正してください" --json
 jvo resume                     # このリポジトリの最新run
 jvo resume <run-id>
 jvo recover <run-id> --acknowledge
+jvo messages <run-id>           # 担当間の会話を読取専用で表示
 jvo replay <run-id>             # 読取専用・APIやworkerを実行しない
 jvo metrics <run-id>            # 観測済みの使用量とセッション再開数
 jvo export-eval <run-id> > cases.json
@@ -92,6 +108,7 @@ jvo eval cases.json --allow-api # 独立した正誤ラベルを付けてから�
 | --- | --- |
 | `/agents` / `/tasks` | 担当、工程、作業場、修正回数を表示 |
 | `/diff` / `/why` | 統合差分、Jevの選択・確率・根拠の記録を表示 |
+| `/messages` | 担当同士の質問・返答・配送状態を表示 |
 | `/usage` | token、cache-read率、観測カバレッジを表示 |
 | `/pause` / `/resume` | 作業を保持して停止・再開 |
 | `/apply` | 検証済み成果物を利用者の作業場へ明示反映 |
@@ -109,8 +126,8 @@ Tabでコマンド補完、↑↓で入力履歴、PgUp/PgDnで表示を移動�
     └─ 固定snapshotをテスト
         └─ 別sessionで独立レビュー
             └─ Jevが判断
-                ├─ 合格 → run用の統合作業場 → 全体検証 → /apply
-                └─ 修正 → S1 / W1へ未解決の指摘だけ追加
+                ├─合格 → run用の統合作業場 → 全体検証 → /apply
+                └─修正 → S1 / W1へ未解決の指摘だけ追加
 ```
 
 通常は**変更タスク単位**のworktreeです。差し戻しで毎回モデル・session・cwdを作り直しません。並列タスクは分離し、同一writerや共有資源の競合をロックします。統合競合は専用タスクへ戻し、再検証・再レビューします。

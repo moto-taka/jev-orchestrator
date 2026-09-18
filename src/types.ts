@@ -32,9 +32,11 @@ export interface Capabilities {
   delegationControl: boolean; executionPolicyControl: boolean;
   isolation: 'sandboxed' | 'workspace-only' | 'unknown';
   level: 'managed' | 'trusted-local' | 'assisted' | 'unavailable';
-  helpHash: string; note: string;
+  helpHash: string; note: string; projectTrustControl?: boolean;
 }
 export interface Profile {
+  modelName?: string; modelDescription?: string; modelSource?: 'cli' | 'saved' | 'alias';
+  contextWindow?: number; reasoning?: boolean; globalPiProviders?: boolean;
   tier?: 'fast' | 'standard' | 'deep' | 'review';
   id: string; adapter: AdapterId; binary: string; version: string;
   model?: string; provider?: string; thinking?: string;
@@ -49,6 +51,7 @@ export interface Trust {
   skills: string[];
 }
 export interface Config {
+  messaging?: { enabled: boolean; maxMessages: number; maxTurnsPerTask: number; ttlMs: number };
   version: 1;
   decision: {
     provider: 'typesafe' | 'vercel'; model: string;
@@ -70,14 +73,24 @@ export interface TaskSpec {
   dependsOn: string[]; readPaths: string[]; writePaths: string[]; resources: string[];
 }
 export type Phase = 'assess' | 'plan-review' | 'implement' | 'verify' | 'review' | 'judge' | 'stage' | 'done' | 'blocked';
-export type TaskStatus = 'queued' | 'ready' | 'running' | 'reported' | 'verifying' | 'reviewing' | 'rework' | 'accepted' | 'staging' | 'blocked' | 'done';
+export type TaskStatus = 'queued' | 'ready' | 'running' | 'reported' | 'verifying' | 'reviewing' | 'rework' | 'accepted' | 'staging' | 'blocked' | 'done' | 'waiting_for_peer';
 export interface Finding {
   id: string; requirement: string; snapshot: string;
   severity: 'info' | 'warning' | 'blocker'; evidence: string; reproduce: string;
   status: 'open' | 'fixed' | 'disputed' | 'not-applicable';
   sources: string[]; duplicateOf?: string;
 }
+export interface PeerQuestion { id: string; to: string; body: string; }
+export interface PeerReply { replyTo: string; body: string; }
+export interface PeerMessage {
+  id: string; runId: string; threadId: string; kind: 'question' | 'answer';
+  fromTaskId: string; toTaskId: string; fromProfileId?: string; invocationId: string;
+  body: string; bodyHash: string; snapshot: string; scopeVersion: number; scopeHash: string; replyTo?: string;
+  status: 'proposed' | 'queued' | 'submitted' | 'answered' | 'closed' | 'rejected' | 'unknown';
+  createdAt: string; expiresAt: string; decisionId?: string; deliveryOperation?: string;
+}
 export interface WorkerReport {
+  peerQuestions?: PeerQuestion[]; peerReplies?: PeerReply[];
   summary: string; claims: string[]; questions: string[];
   plan?: TaskSpec[]; findings?: Omit<Finding, 'snapshot' | 'sources'>[];
 }
@@ -87,6 +100,7 @@ export interface Evidence {
   trust: 'runtime-observed' | 'worker-claimed' | 'user-specified'; truncated: boolean;
 }
 export interface Task {
+  peerTurns?: number;
   id: string; runId: string; spec: TaskSpec; version: number;
   phase: Phase; status: TaskStatus; kind: 'work' | 'conflict' | 'integration';
   workspace?: string; branch?: string; base?: string; snapshot?: string;
@@ -112,8 +126,10 @@ export interface Run {
 }
 export type ActionKind = 'REQUEST_SCOUT' | 'REQUEST_PLAN' | 'ACCEPT_PLAN' | 'START_TASK'
   | 'REQUEST_REVIEW' | 'REQUEST_EVIDENCE' | 'REWORK_SAME_SESSION' | 'REASSIGN_TASK'
-  | 'ACCEPT_TASK' | 'STAGE_INTEGRATION' | 'ASK_USER' | 'PAUSE' | 'CANCEL';
+  | 'ACCEPT_TASK' | 'STAGE_INTEGRATION' | 'ASK_USER' | 'PAUSE' | 'CANCEL'
+  | 'DELIVER_MESSAGE' | 'REJECT_MESSAGE' | 'ANSWER_PEER' | 'CONTINUE_AFTER_PEER';
 export interface Candidate {
+  messageIds?: string[];
   id: string; kind: ActionKind; taskId: string; profileId?: string;
   sessionId?: string; workspace?: string; evidenceIds: string[];
   reason: string; specialization?: string; findingResolutions?: Record<string, Finding['status']>;
@@ -148,6 +164,7 @@ export interface AgentResult {
 }
 export interface AgentAdapter { run(invocation: Invocation): Promise<AgentResult>; }
 export interface View {
+  messages?: PeerMessage[];
   run?: Run; tasks: Task[];
   events: { time: string; kind: string; text: string; taskId?: string }[];
   agents: Profile[]; usage: Usage[]; decisions: Decision[];

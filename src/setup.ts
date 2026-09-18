@@ -2,13 +2,16 @@ import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { readFileSync } from 'node:fs';
 import { loadConfig, saveConfig, configPath, repoId, keyEnv, getKey, storeKey } from './config.ts';
-import { detectAll, profileFrom } from './adapters/registry.ts';
+import { detectAll } from './adapters/registry.ts';
 import { JevProvider } from './decision/provider.ts';
 import { repository } from './workspaces.ts';
 import { invariant, now } from './util.ts';
 import { sanitize } from './security.ts';
-import type { CommandSpec, Config, Trust, Profile } from './types.ts';
+import type { CommandSpec, Config, Trust, Profile, Capabilities } from './types.ts';
+import { discoverModels, scopedProfiles, modelKey, matchesScope, piScopePatterns, type ModelOption, type ModelCatalog } from './models/catalog.ts';
+import { pickModels } from './models/picker.ts';
 export class Prompter {
+  async models(title: string, models: ModelOption[], selected: string[]): Promise<ModelOption[]> { return pickModels(title, models, selected); }
   async ask(question: string, fallback = ''): Promise<string> {
     invariant(stdin.isTTY && stdout.isTTY, 'Interactive setup requires a terminal. Use environment keys and the documented configuration JSON for automation.');
     const rl = createInterface({ input: stdin, output: stdout });
@@ -46,6 +49,7 @@ export function parseCommand(input: string): string[] {
   invariant(result.length > 0, 'Empty command'); return result;
 }
 export async function setup(config = loadConfig(), prompts = new Prompter()): Promise<Config> {
+  config = structuredClone(config);
   stdout.write('\njvo · Jev Orchestrator\nJevの判断用APIと、作業用CLIを別々に設定します。OAuthトークンは取り出しません。\n\n');
   const provider = await prompts.ask('Jev接続先: 1 TypeSafe公式 / 2 Vercel AI Gateway', config.decision.provider === 'vercel' ? '2' : '1');
   invariant(provider === '1' || provider === '2', '1 または 2 を指定してください。');
@@ -67,36 +71,55 @@ export async function setup(config = loadConfig(), prompts = new Prompter()): Pr
     const result = await new JevProvider(config.decision, key).evaluate('Connection check only. The number is 2.', { check: { type: 'boolean', instructions: 'Is the supplied number equal to 2?' } });
     stdout.write(`接続できました: ${sanitize(result.resolvedModel ?? result.requestedModel)}\n`);
   }
-  const detected = await detectAll();
-  stdout.write('\nインストール済みCLI（認証は未確認・無課金の検出）\n');
-  for (const [i, c] of detected.entries()) stdout.write(`  ${i + 1}. ${c.adapter} · ${c.version} · ${c.level}\n`);
-  invariant(detected.length > 0, '対応CLIが見つかりません。codex / claude / pi / opencode のいずれかをインストールしてから jvo setup を実行してください。');
-  const selected = await prompts.ask('自動実行を許可する番号（例: 1,2）', detected.map((_, i) => String(i + 1)).join(','));
+  return setupModels(config, prompts);
+}
+export async function setupModels(config = loadConfig(), prompts = new Prompter(), services: {
+  detect?: () => Promise<Capabilities[]>;
+  discover?: typeof discoverModels;
+  save?: (c: Config) => void;
+} = {}): Promise<Config> {
+  // Do not mutate the caller's/previous configuration on escape, error, or an empty selection.
+  const next: Config = structuredClone(config), detected = await (services.detect ?? detectAll)();
+  stdout.write('\nインストール済みCLI（認証・契約枠は未確認）\n');
+  for (const [i, c] of detected.entries()) stdout.write(`  ${i + 1}. ${sanitize(c.adapter)} · ${sanitize(c.version)} · ${c.level}\n`);
+  invariant(detected.length > 0, '対応CLIが見つかりません。codex / claude / pi / opencode を確認してください。');
+  const priorCli = detected.flatMap((c, i) => config.profiles.some(p => p.enabled && p.adapter === c.adapter) ? [String(i + 1)] : []);
+  const selected = await prompts.ask('自動実行を許可するCLI番号（例: 1,2,3）', priorCli.length ? priorCli.join(',') : detected.map((_, i) => String(i + 1)).join(','));
+  invariant(/^\d+(?:\s*,\s*\d+)*$/.test(selected), 'CLI番号をカンマ区切りで指定してください。');
   const numbers = [...new Set(selected.split(',').map(n => Number(n.trim()) - 1))];
   invariant(numbers.length > 0 && numbers.every(n => Number.isInteger(n) && n >= 0 && n < detected.length), 'Invalid CLI selection');
-  const profiles = [];
+  stdout.write('各CLIのモデル一覧を取得します。生成プロンプトは送信しません。CLIの認証更新・モデル一覧の通信や、利用者設定の読込は発生する場合があります。\n');
+  const profiles: Profile[] = [];
   for (const n of numbers) {
-    const cap = detected[n]!, prior = config.profiles.find(p => p.id === cap.adapter), profile = profileFrom(cap);
-    const model = await prompts.ask(`${cap.adapter}のモデルID（空欄でCLI既定）`, prior?.model ?? 'default');
-    if (model !== 'default') profile.model = model;
-    const tier = await prompts.ask(`${cap.adapter}の用途: fast / standard / deep / review`, prior?.tier ?? 'standard');
-    invariant(['fast', 'standard', 'deep', 'review'].includes(tier), 'Invalid profile tier'); profile.tier = tier as Profile['tier'];
-    profiles.push(profile);
-  }
-  if (await prompts.yes('同じCLIに別モデルのprofileを追加しますか')) {
-    for (;;) {
-      const name = await prompts.ask('profile名（例: fast / deep / review、終了は空欄）'); if (!name) break;
-      invariant(/^[a-zA-Z0-9_-]{1,64}$/.test(name) && !profiles.some(p => p.id === name), 'Invalid or duplicate profile name');
-      const n = Number(await prompts.ask('使用するCLI番号', '1')) - 1; invariant(Number.isInteger(n) && n >= 0 && n < detected.length, 'Invalid CLI number');
-      const profile = profileFrom(detected[n]!); profile.id = name;
-      const model = await prompts.ask('モデルID', 'default'); if (model !== 'default') profile.model = model;
-      const tier = await prompts.ask('用途: fast / standard / deep / review', ['fast', 'standard', 'deep', 'review'].includes(name) ? name : 'standard');
-      invariant(['fast', 'standard', 'deep', 'review'].includes(tier), 'Invalid tier'); profile.tier = tier as Profile['tier'];
-      if (tier === 'review') profile.roles = ['reviewer']; profiles.push(profile);
+    const cap = detected[n]!, previous = config.profiles.filter(p => p.adapter === cap.adapter);
+    invariant(cap.structuredEvents, `${cap.adapter}には対応する構造化プロトコルがありません。`);
+    let globalPiProviders = false;
+    if (cap.adapter === 'pi' && cap.projectTrustControl) {
+      globalPiProviders = await prompts.yes('Piの利用者領域に登録済みのprovider拡張を読み込みますか（拡張コードを実行します。プロジェクト拡張は無効）', previous.some(p => p.globalPiProviders) || !previous.length);
     }
+    let catalog: ModelCatalog;
+    for (;;) {
+      stdout.write(`\n${cap.adapter}: モデル一覧を取得しています…\n`);
+      catalog = await (services.discover ?? discoverModels)(cap, { previous, globalPiProviders });
+      for (const warning of catalog.warnings) stdout.write(sanitize(warning) + '\n');
+      if (catalog.models.length || !(await prompts.yes('一覧を再取得しますか'))) break;
+    }
+    if (!catalog.models.length) continue;
+    const priorIds = previous.filter(p => p.enabled).map(p => modelKey(p.adapter, p.provider, p.model ?? 'default'));
+    const scope = !previous.length && cap.adapter === 'pi' ? piScopePatterns() : [];
+    const initial = priorIds.length ? priorIds : catalog.models.filter(m => matchesScope(m, scope)).map(m => m.id);
+    const chosen = await prompts.models(`${cap.adapter} · 使用を許可するモデル（複数選択）`, catalog.models, initial);
+    invariant(chosen.every(m => catalog.models.some(x => x.id === m.id && x.model === m.model && x.provider === m.provider)), 'Selection is outside the discovered catalog');
+    profiles.push(...scopedProfiles(cap, chosen, previous, globalPiProviders));
+    stdout.write(`${cap.adapter}: ${chosen.length}モデルを許可。役割はJevが実行時に選択します。\n`);
   }
-  config.profiles = profiles; saveConfig(config);
-  stdout.write(`\n設定しました: ${configPath()}\nキーは設定JSONに保存していません。CLI更新時には実行前に再承認を求めます。\n`); return config;
+  invariant(profiles.length > 0, 'モデルが選択されていません。既存設定は変更していません。');
+  invariant(profiles.length <= 256, '許可モデルは合計256件以内に絞ってください。');
+  next.profiles = profiles;
+  next.messaging ??= { enabled: true, maxMessages: 64, maxTurnsPerTask: 4, ttlMs: 1_800_000 };
+  (services.save ?? saveConfig)(next);
+  stdout.write(`\n設定しました: ${configPath()}\n${profiles.length}モデルを許可しました。CLIごとの用途固定はありません。未選択のモデルはJevの候補に入りません。\n`);
+  return next;
 }
 export async function trustRepository(cwd: string, config = loadConfig(), prompts = new Prompter()): Promise<Config> {
   const repo = await repository(cwd), key = repoId(repo), previous = config.trusts[key];

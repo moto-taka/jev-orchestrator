@@ -1,3 +1,4 @@
+import { parsePeerQuestions, parsePeerReplies } from './messaging/mailbox.ts';
 import type { Finding, TaskSpec, WorkerReport } from './types.ts';
 import { invariant, object, strings, text } from './util.ts';
 import { validateRelativePath } from './security.ts';
@@ -22,6 +23,8 @@ export function parseReport(output: string): WorkerReport {
       return { id, requirement: text(f.requirement), severity: f.severity as Finding['severity'], evidence: text(f.evidence), reproduce: text(f.reproduce ?? ''), status: status as Finding['status'] };
     });
   }
+  if (raw.peerQuestions !== undefined) report.peerQuestions = parsePeerQuestions(raw.peerQuestions);
+  if (raw.peerReplies !== undefined) report.peerReplies = parsePeerReplies(raw.peerReplies);
   return report;
 }
 export function validateTaskSpec(value: unknown): TaskSpec {

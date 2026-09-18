@@ -21,6 +21,7 @@ export async function detectOne(adapter: AdapterId, binary?: string): Promise<Ca
       modelSelection: h.includes('--model'), modelIdentityObservable: adapter !== 'codex', structuredFinalReport: structured,
       usageTelemetry: structured ? 'tokens-and-cache' : 'none', delegationControl: adapter === 'pi' || adapter === 'claude',
       executionPolicyControl: policy, isolation: adapter === 'codex' && policy ? 'sandboxed' : 'workspace-only',
+      projectTrustControl: adapter === 'pi' && h.includes('--no-approve') && h.includes('--no-context-files'),
       level: structured ? 'trusted-local' : 'assisted', helpHash: hash({ v, h }),
       note: 'Authentication is not tested by discovery. Local tools/configuration must be trusted; worktrees are not an OS sandbox.' };
   } catch { return undefined; }

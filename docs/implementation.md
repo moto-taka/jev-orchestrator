@@ -1,3 +1,13 @@
+# 0.2.0での拡張
+
+- `src/models/catalog.ts` / `picker.ts` / `setup.ts`: CLI別モデル一覧・複数許可。tier入力なし、Jevがモデルと役割を選択。詳しくは[モデル設定](models.md)。
+- `src/messaging/mailbox.ts` / `engine.ts`: 外部ツール不要のnative peer通信、Jevによる配送承認、宛先・返信の相関、元session/cwdの継続、上限、復旧。詳しくは[通信仕様](agent-messaging.md)。
+- `test/models.test.ts` / `messaging.test.ts`: metadataとCLI形式のfixtureを使った実子プロセス試験。
+
+以下の表は0.1.0時点の基盤に関する対応記録です。追加されたモデル設定・通信については上記が優先します。
+
+---
+
 # 設計と実装の対応
 
 原設計書は [design.md](design.md) にそのまま保存しています。この文書は原設計を完了扱いに書き換えるものではなく、実装位置、確認方法、外部検証の境界を対応付けるものです。
