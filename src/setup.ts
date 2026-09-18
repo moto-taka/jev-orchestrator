@@ -111,14 +111,14 @@ export async function setupModels(config = loadConfig(), prompts = new Prompter(
     const chosen = await prompts.models(`${cap.adapter} · 使用を許可するモデル（複数選択）`, catalog.models, initial);
     invariant(chosen.every(m => catalog.models.some(x => x.id === m.id && x.model === m.model && x.provider === m.provider)), 'Selection is outside the discovered catalog');
     profiles.push(...scopedProfiles(cap, chosen, previous, globalPiProviders));
-    stdout.write(`${cap.adapter}: ${chosen.length}モデルを許可。役割はJevが実行時に選択します。\n`);
+    stdout.write(`${cap.adapter}: ${chosen.length}モデルを許可。役割・モデル・対応EffortはJevが実行時に選択します。\n`);
   }
   invariant(profiles.length > 0, 'モデルが選択されていません。既存設定は変更していません。');
   invariant(profiles.length <= 256, '許可モデルは合計256件以内に絞ってください。');
   next.profiles = profiles;
   next.messaging ??= { enabled: true, maxMessages: 64, maxTurnsPerTask: 4, ttlMs: 1_800_000 };
   (services.save ?? saveConfig)(next);
-  stdout.write(`\n設定しました: ${configPath()}\n${profiles.length}モデルを許可しました。CLIごとの用途固定はありません。未選択のモデルはJevの候補に入りません。\n`);
+  stdout.write(`\n設定しました: ${configPath()}\n${profiles.length}モデルを許可しました。CLIごとの用途・Effort固定はありません。未選択のモデルやCLIが公開していないEffortはJevの候補に入りません。\n`);
   return next;
 }
 export async function trustRepository(cwd: string, config = loadConfig(), prompts = new Prompter()): Promise<Config> {
