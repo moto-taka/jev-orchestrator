@@ -1,0 +1,267 @@
+diff --git a/README.md b/README.md
+index e2c9814..a5a08f1 100644
+--- a/README.md
++++ b/README.md
+@@ -2,0 +3,14 @@
++## 0.3.0: 決まった処理ではJevを呼びません
++
++Jevは方針・モデル・役割・例外・合否を判断します。通常のA2A配送、同じ担当への返答、限定した修正、合格後の統合は、承認済み範囲内でコードが進めます。チェックや独立レビューをなくす変更ではありません。通常コードの記録はJevの実判断と区別します。
++
++```sh
++brew update
++brew upgrade moto-taka/jev-orchestrator/jvo
++jvo --version # 0.3.0
++```
++
++新規runは新制御です。既存runを切り替える場合だけ、TUIで `/pause` → `/exit` 後に `jvo resume <run-id> --refresh-policy` を実行してください。APIキーや許可モデルを再入力する必要はありません。[判断削減・安全条件](docs/lean-decisions.md)
++
++任意の `jvo triage reports.json` も追加しました。保存した報告を仕分け、`--allow-api` を指定した場合だけ曖昧なものをJevへまとめて問い合わせます。`--operator=<許可済みprofile-id> --allow-worker` で注意対象だけをモデルへまとめて相談できます。通常のjvoに別の常駐司令塔は追加しません。[報告の仕分け](docs/report-triage.md)
++
+@@ -30 +44 @@ Node.js 24はHomebrewが依存として用意します。既存CLIの認証は
+-初回のHomebrew対応はmacOS上で `brew tap`・`brew install`・`brew test` を検証済みです（[0.1.0の検証run](https://github.com/moto-taka/jev-orchestrator/actions/runs/35309383943)）。0.2.0の結果はリポジトリのActionsを確認してください。CIでは認証済みcheckoutのローカルGitミラーを使い、利用者のSSH認証そのものや実Jev APIは試験しません。
++初回のHomebrew対応はmacOS上で `brew tap`・`brew install`・`brew test` を検証済みです（[0.1.0の検証run](https://github.com/moto-taka/jev-orchestrator/actions/runs/35309383943)）。各リリースの結果はリポジトリのActionsを確認してください。CIでは認証済みcheckoutのローカルGitミラーを使い、利用者のSSH認証そのものや実Jev APIは試験しません。
+@@ -69 +83 @@ brew upgrade moto-taka/jev-orchestrator/jvo
+-jvo --version   # 0.2.0
++jvo --version   # 0.3.0
+@@ -77 +91 @@ Piの同一モデル名でもproviderごとに別項目として保持し、既
+-0.2.0では、**agmsg・Orca・Herdrを使わず**、jvo内部で異なる担当の質問と返答を交換します。各workerが文章を書き、Jevが宛先・配送・回答モデル・続行を判断します。質問元のモデル/session/worktreeを保って返答だけを追加します。
++**agmsg・Orca・Herdrを使わず**、jvo内部で異なる担当の質問と返答を交換します。各workerが文章を書き、通常の配送・担当済み相手の回答・元sessionへの続行はjvoのコードが行います。未割当の相手のモデル選択や例外はJevが判断します。質問元のモデル/session/worktreeを保って返答だけを追加します。
+diff --git a/docs/agent-messaging.md b/docs/agent-messaging.md
+index 8860de7..e060b45 100644
+--- a/docs/agent-messaging.md
++++ b/docs/agent-messaging.md
+@@ -1 +1 @@
+-# jvo内蔵のエージェント間通信（0.2.0）
++# jvo内蔵のエージェント間通信（0.3.0）
+@@ -9 +9 @@ API担当（Codex）: UI担当へ、仕様について質問を提出
+-  → Jevが配送を承認
++  → jvoが宛先・権限・期限を検査して配送
+@@ -11 +11 @@ API担当（Codex）: UI担当へ、仕様について質問を提出
+-  → Jevが返答の配送を承認
++  → jvoが返信先・相関・状態を検査して配送
+@@ -16 +16 @@ API担当（Codex）: UI担当へ、仕様について質問を提出
+-通信する文章はworkerが生成します。Jevは配送先・配送の可否・回答担当のモデル・元セッションでの続行を選びます。会話で合意しても作業範囲や合格条件は変わらず、完了承認は別の検証経路です。
++通信する文章はworkerが生成します。既に担当が決まっている通常会話はJevへ聞き直しません。回答担当が未割当の場合のモデル選択や、作業の例外判断はJevが行います。会話で合意しても作業範囲や合格条件は変わらず、完了承認は別の検証経路です。
+@@ -20 +20 @@ API担当（Codex）: UI担当へ、仕様について質問を提出
+-0.2.0は **同じrunの具体的な作業タスク間で、ターンの区切りに会話する方式** です。実装workerが質問を含めた構造化報告を出して待機します。全員が実行枠を保持して相手を待ち続ける設計ではなく、質問待ちの担当は枠を解放し、互いに返答待ちの場合も読取専用の回答ターンを進められます。
++現行版は **同じrunの具体的な作業タスク間で、ターンの区切りに会話する方式** です。実装workerが質問を含めた構造化報告を出して待機します。全員が実行枠を保持して相手を待ち続ける設計ではなく、質問待ちの担当は枠を解放し、互いに返答待ちの場合も読取専用の回答ターンを進められます。
+@@ -34 +34 @@ TUIの `/messages` で質問・返答・宛先・配送状態・snapshotを表
+-状態は `proposed`（Jev待ち）、`queued`（配送待ち）、`submitted`（入力したが完了未確認）、`answered`（返答を保存）、`closed`（元担当の継続ターン完了）、`rejected`、`unknown` を区別します。modelが内面的に理解したかどうかは観測できないため、「既読」や「理解済み」という架空の確認は表示しません。
++状態は `proposed`（宛先・権限の検査待ち）、`queued`（配送待ち）、`submitted`（入力したが完了未確認）、`answered`（返答を保存）、`closed`（元担当の継続ターン完了）、`rejected`、`unknown` を区別します。modelが内面的に理解したかどうかは観測できないため、「既読」や「理解済み」という架空の確認は表示しません。
+@@ -46 +46 @@ TUIの `/messages` で質問・返答・宛先・配送状態・snapshotを表
+-質問・返答とも、Jevの具体的な候補選択とoutboxに結び付けます。通常タスクの無関係な進捗で配送判断を無効にせず、関係するtaskの版、質問元snapshot、policy、scope、本文hash、期限を検証します。配送直前には対象worktreeも再確認します。
++質問・返答とも、元の担当割当の権限とoutboxに結び付けます。新制御は通常コードのpolicy記録を使い、架空のJev判断は作りません。通常タスクの無関係な進捗で配送判断を無効にせず、関係するtaskの版、質問元snapshot、policy、scope、本文hash、期限を検証します。配送直前には対象worktreeも再確認します。
+@@ -64 +64 @@ TUIの `/messages` で質問・返答・宛先・配送状態・snapshotを表
+-`test/messaging.test.ts` は、CodexとClaude形式のテスト用CLIを実際の子プロセスで起動し、双方向質問→Jev選択→返答→元session/cwd/modelの継続→テスト→独立レビュー→統合を実行します。実行枠1と3の双方で検証します。送信者偽装、scope/期限、部分返答、配送拒否、読取専用違反、不明配送の復旧も検証します。
++`test/messaging.test.ts` は、CodexとClaude形式のテスト用CLIを実際の子プロセスで起動し、双方向質問→権限検査・必要なモデル選択→返答→元session/cwd/modelの継続→テスト→独立レビュー→統合を実行します。実行枠1と3の双方で検証します。送信者偽装、scope/期限、部分返答、配送拒否、読取専用違反、不明配送の復旧も検証します。
+@@ -66,0 +67,2 @@ TUIの `/messages` で質問・返答・宛先・配送状態・snapshotを表
++
++旧0.2.0のrunは明示的なpolicy更新まで旧配送ゲートを維持します。詳しくは[判断削減](lean-decisions.md)を参照してください。
+diff --git a/docs/implementation.md b/docs/implementation.md
+index 9aaffc6..90a632c 100644
+--- a/docs/implementation.md
++++ b/docs/implementation.md
+@@ -0,0 +1,11 @@
++# 0.3.0での変更
++
++- `src/engine.ts` / `storage.ts` / `types.ts`: 実Jev判断を元にした限定的なruntime継続権限、A2A配送、修正、レビュー担当維持、合格後統合。旧runの動作は明示更新まで保持。
++- `src/decision/questions.ts`: 行動とモデル適性の独立質問、初回評価の集約、合否の重複確認廃止。
++- `src/report-triage.ts` / `triage-command.ts`: 任意の報告仕分け、通常報告の保存、保守的な注意対象選別、許可モデルへのまとめた助言依頼。常駐司令塔は追加しない。
++- `test/lean.test.ts` / `triage.test.ts`: 回数の経路比較、モデルの拮抗、古い権限、最終試験の環境変化、通常/重要/秘匿報告の区別。
++
++詳しくは[判断削減](lean-decisions.md)と[報告仕分け](report-triage.md)。以下は原設計への過去の対応記録です。0.2.0の配送ごとのJev承認は、新規runでは通常コードへ移しています。
++
++---
++
+diff --git a/docs/lean-decisions.md b/docs/lean-decisions.md
+new file mode 100644
+index 0000000..6c62d57
+--- /dev/null
++++ b/docs/lean-decisions.md
+@@ -0,0 +1,63 @@
++# 必要な判断だけJevへ渡す（0.3.0）
++
++新規runの既定は `lean-v1` です。Jevは方針、モデル・役割、例外、意味上の合否を決めます。決まった作業を続けるためだけの再承認は行いません。実行・権限・予算・状態の鮮度を検査するコードと、実測テスト・独立レビューは残します。
++
++## 何が変わるか
++
++| 場所 | 0.3.0の動作 |
++|---|---|
++| 通常のtoken・tool進捗 | 従来通り保存・表示のみ。Jevも追加の司令塔も呼ばない |
++| A2Aの質問・返答の配送 | 送信元、宛先、本文hash、期限、scope、snapshotを通常コードで確認して配送 |
++| 担当済み相手の回答・質問元の続行 | 元のモデル/session/cwdを維持し、通常コードで起動。未割当の相手のモデル選択だけJev |
++| 単純なテストassertion失敗 | 許可済みの回数・時間・範囲内で、同じ実装担当へ差分修正。環境障害・原因不明・反復失敗は別途Jevへ |
++| 必要なレビューの反復 | Jevが選んだレビューモデルを再利用。ただし会話は実装とも前回レビューとも別の独立session |
++| 合否 | 証拠十分性・要件達成・未解決指摘の評価から直接承認。合格を再びChoiceで聞き直さない |
++| 合格後の統合 | 合格した固定成果物の通常処理。競合したら専用タスクを作って再検証・再レビュー |
++| 単一タスクの最終確認 | 下記の厳しい同一性条件を満たす場合に限り、独立レビューとJevの判定を再利用。最終テストは再実行 |
++| 文脈の一次選別 | ローカルで順位付け・サイズ制限。毎回「READMEを読むか」をJevに質問しない |
++| 指摘の完全重複 | 同じsnapshot/要件/根拠/再現条件/重大度の完全一致だけを機械的に注記。原文と異なる指摘は保持 |
++
++この変更は「workerが自分で完了承認できる」ことを意味しません。通常コードによる継続処理も、元になった実際のJev判断、許可された操作、scope、実行前条件を記録します。
++
++## 行動の不確実性と、モデル選択の拮抗を分ける
++
++以前は「実装×モデルA」「実装×モデルB」「調査×モデルA」等を一つのChoiceに並べていました。現在は行動と各行動に適任なモデルの質問を分け、同一の根拠を使う独立質問として一回で評価します。各行動のモデル回答は、その行動が選ばれた場合だけ採用します。
++
++難易度の各軸も初回の独立質問として同送します。後の質問が前の回答を見たと仮定していません。モデルが多数同程度に適任であることだけを理由にrunを停止しません。合否や危険な行動の閾値は下げません。モデルは利用者の許可リスト内でのみ選択します。
++
++## 判定の再利用と、通常処理の監査
++
++`decisions` は実際にJevへ問い合わせた記録だけです。通常コードがJev風の確率や承認を偽造することはありません。通常処理はoutboxの `policy` に、rule、元の `decisionId`、関連するtask/scope版、候補hash、判断材料のartifactを持ちます。トランザクションで記録し、実行直前にも検査します。
++
++`/why` はこの二種類を区別します。`jvo metrics <run-id>` は `decisionCalls`、`runtimeTransitions`、`reusedVerdicts` と実測可能なtoken統計を返します。通常の実行処理にかかった件数を、削減した実API料金と換算して表示しません。
++
++## 単一タスクの最終確認を再利用できる条件
++
++最初の依頼をそのまま扱う一つの変更タスクで、計画分割、追加の利用者指示、依存taskがなく、承認済みsnapshotを基準commitからfast-forwardできる場合に限ります。実装・統合のcommit、要件、許可設定、テスト・レビュー対象、指摘、証拠hashが一致し、元の承認が有効であることも確認します。
++
++**commit一致だけで外部DB等の検証環境まで同じとはみなしません。最後のruntimeテストは再実行します。** テスト失敗や統合場の変更があればreadyになりません。複数task、merge commit、競合、scope変更では通常の全体検証・独立レビュー・Jev判定を残します。
++
++## memoに不要な変動を混ぜない
++
++Jevのstateから、単に毎回変化する残りAPI回数・worker起動数を外しました。ルーティングでは必要な予算の可否だけを渡し、上限到達時は実行候補も制限します。実行直前の厳密な予算・権限検査は省略しません。
++
++合否評価には、全許可モデルの一覧や無関係な設定を毎回送りません。違うsnapshotや更新された証拠に合格を使い回しません。providerのprompt cacheとは別の仕組みです。APIモデルのaliasやpolicyが変わる場合の再利用制約も維持しています。
++
++## 旧runの扱い
++
++0.2.0で開始したrunは、勝手に新しい継続権限へ変えず、保存済みの旧動作を維持します。新しいrunはそのままleanになります。保存済みrunを移行する場合だけ実行します。
++
++```sh
++# 既存TUIで /pause → /exit を実行した後
++jvo resume <run-id> --refresh-policy
++```
++
++設定の再確認により、古いテスト・レビューと継続用の権限は再評価対象になります。作業ファイルは削除しません。モデルの許可リストは `jvo models` で変更できます。
++
++## 検証と数字の意味
++
++同じテスト用provider・workerを使った小さな直接実装タスクで、旧制御はJev評価9回、新制御は3回でした。新制御の3回は、初回の方針・実装モデル選択、レビューモデル選択、意味上の合否です。元の隔離デモも、assertion失敗の修正を一回含めて3回で終了します。
++
++これは **制御コードをテスト用入出力で通した経路の測定** です。実Jev APIの速度・課金、実workerの正解率、token削減率、実運用のキャッシュ率を測ったものではありません。複雑な依頼には調査、計画、再判定が追加されます。全taskが3回になるという保証ではありません。
++
++`test/lean.test.ts` ではモデル候補の拮抗、memoの適用条件、実行待ち中のscope変更、完全一致しない指摘の保持、同一commitでも最後のテストが失敗した場合の拒否を確認します。従来の障害・排他・復旧テストも残しています。
+diff --git a/docs/models.md b/docs/models.md
+index d8f5677..0e28936 100644
+--- a/docs/models.md
++++ b/docs/models.md
+@@ -1 +1 @@
+-# CLI別の許可モデル一覧（0.2.0）
++# CLI別の許可モデル一覧（0.3.0）
+@@ -8 +8 @@ brew upgrade moto-taka/jev-orchestrator/jvo
+-jvo --version  # 0.2.0
++jvo --version  # 0.3.0
+@@ -48,0 +49,2 @@ Claudeの `opusplan` は、Jev以外が役割によってモデルを切り替
++
++0.3.0ではモデル候補同士の拮抗を、作業を止めるべき不確実性と区別します。行動とモデルの質問を独立して評価し、人間が役割を固定する方式には戻していません。[詳細](lean-decisions.md)
+diff --git a/docs/report-triage.md b/docs/report-triage.md
+new file mode 100644
+index 0000000..f006dae
+--- /dev/null
++++ b/docs/report-triage.md
+@@ -0,0 +1,75 @@
++# 報告を仕分けて、必要なものだけまとめて読む（0.3.0）
++
++`jvo triage` は**保存した報告JSONを処理する任意のコマンド**です。通常のjvoに文章生成型の司令塔を追加するものではありません。外部端末を常時監視する機能でもありません。生成・tool進捗は、通常のjvoではもともと表示・保存だけでJevを呼びません。
++
++## 流れ
++
++```text
++保存済みの報告
++  ├─ 空のheartbeat → ローカルに保持
++  ├─ 質問・失敗・完了・範囲変更・承認要求 → 必ず注意対象
++  ├─ 秘密情報の疑い → ローカル確認のみ。Jevにもoperatorにも送らない
++  └─ その他の曖昧な報告 → 許可した場合だけJevへまとめて分類
++       ├─ 明確に通常の経過 → 原文を保存し、operatorへは送らない
++       └─ 不確実・不正回答・障害・予算超過 → 注意対象へ
++注意対象 → 保存して表示
++         → 明示許可した場合だけ、選んだモデルへまとめて相談
++```
++
++`kind: progress` はworkerの自己申告なので、それだけを理由に捨てません。自由文中の明確な質問、失敗、完了、権限変更なども保守的に拾います。ただし正規表現やJevの判定に完全な検出を保証する能力はありません。日本語や婉曲表現を含む実際の報告で校正する必要があります。
++
++## 使用例
++
++```sh
++# 既定はコードだけ。Jevキー不要、生成APIなし。
++jvo triage reports.json
++
++# 曖昧な報告だけJevで分類（API利用への明示許可）
++jvo triage reports.json --allow-api
++
++# 注意が必要な報告だけ、許可済みCLIモデルへまとめて読ませる
++jvo models --json  # 保存済みprofile IDを確認（APIなし）
++jvo triage reports.json --allow-api --operator=<profile-id> --allow-worker
++```
++
++`--operator` は既に利用者が許可したモデルを指定します。未許可モデルへ変更しません。Jevの仕分けをせず、ルールとまとめ読みだけを試す場合は `--allow-api` を付けずに同じoperatorを指定します。
++
++ここでのoperatorは**助言専用**です。scope変更・リリース・権限付与・ファイル編集・タスク完了承認を実行しません。元のプロジェクトを渡さない空の作業場で、CLIの読取専用の役割と実行後のファイル検査を利用します。worktreeや読取用のプロンプトをOS sandboxとみなすものではなく、利用は信頼済みローカルCLIに限ります。
++
++## JSON形式
++
++```json
++[
++  {"id":"p1","kind":"progress","taskId":"API","text":"ファイルを編集中です。"},
++  {"id":"q1","kind":"question","taskId":"UI","text":"AとBのどちらにしますか？"},
++  {"id":"b1","kind":"blocked","taskId":"API","text":"テストが失敗しました。"},
++  {"id":"c1","kind":"completed","taskId":"TEST","text":"確認が完了しました。"}
++]
++```
++
++配列または `{"reports": [...]}` を受け取ります。idは重複不可、最大256件。kindは `unknown` / `progress` / `heartbeat` / `question` / `blocked` / `completed` / `scope-change` / `approval` です。省略するとunknownです。件数、本文、ファイル、API回数、operatorのbatch数に上限があり、超過を黙って切り捨てません。
++
++## 分類と保存
++
++曖昧な報告は最大12件ずつの独立したboolean質問としてJevへ渡します。通常とする閾値の初期値は0.99です。これは正解率99%の保証ではありません。重要と分かっている構造化イベントを、Jevの分類で通常報告へ格下げしません。
++
++結果は `~/.local/state/jvo/triage/<id>/`（JVO_HOME指定時はその下）へ保存します。
++
++- `intake.json`: API処理前のローカル入力控え。秘密らしい値は伏せます。
++- `reports.json`: 全報告と仕分け結果。通常扱いした本文も含みます。
++- `operator-<n>.json`: 任意のoperatorへの送信記録・応答。自動再送しません。
++- `result.json`: 対象件数、Jev呼出し数・観測可能なusage、operator回数・usage、助言。
++
++秘匿値は出力コピーでも伏せるため、完全な原本は利用者が指定した元ファイルです。元ファイルを変更・削除しません。`localOnly` は必ずローカルで確認してください。
++
++operatorへはattentionだけを最大32KBずつ送ります。通常の報告を隠してプロンプトへ混ぜたり、全履歴を要約し直したりしません。複数batchは同じモデル・session・cwdへ追加します。session継続を確認できない場合は停止し、別sessionへ黙って置き換えません。容量不足や送信結果不明の場合も履歴を保持し、勝手に再実行しません。
++
++## ご提示の比較と、測定を分ける
++
++ご提示の記事には、報告をまとめるだけの効果と、Jevに仕分けさせる追加効果を別々に比較する重要な点があります。jvoでも、ルールだけ＋まとめ読みと、Jev仕分け＋同じモデルのまとめ読みを比較できます。ただしこの記事の33万→14万token等はjvoで再現測定した数字ではありません。
++
++本実装では6件のテスト用報告について、明確な重要4件を必ず残し、曖昧な2件を一回の分類要求へまとめる制御を試験しています。classifierはfixtureであり、Jevの精度評価ではありません。
++
++実測では同じ報告集合、同じモデル・設定・初期文脈、複数回の順序を変えた比較を使い、仕分けの誤り、重要報告の取りこぼし、通常報告の誤通知、全体の経過時間、cache読取を分けたusageを記録してください。表示されたtokenから未観測のサブスク追加請求額を0円やAPI標準料金と断定しません。
++
++現段階は保存報告の仕分けと助言の経路です。自動運転する常駐司令塔・他社ターミナルの操作・ネットワークA2Aへの接続は追加していません。
+diff --git a/docs/verification.md b/docs/verification.md
+index 636a25c..d0b54e9 100644
+--- a/docs/verification.md
++++ b/docs/verification.md
+@@ -0,0 +1,10 @@
++# 0.3.0 追加検証
++
++2026-09-18: ローカルで型チェック、107件中105件成功、実APIの2件は明示skip。ビルド、インストール用パッケージのofflineインストール、隔離デモも成功。
++
++新しいテストは、同じfixtureでの旧経路9回/新経路3回、モデル候補8個の拮抗、memoの変動分離、実行直前のscope変更拒否、同一commitの最終テスト失敗の拒否、報告6件の原文保持・重要4件の強制選別・曖昧2件のbatch化を含みます。Jev本番の精度・料金・速度・token削減率を測定した値ではありません。
++
++GitHub ActionsとHomebrewのリリース別の結果は、それぞれの実行runで確認してください。ローカル試験成功を未実行の遠隔CI成功とは扱いません。
++
++---
++
+diff --git a/examples/reports.example.json b/examples/reports.example.json
+new file mode 100644
+index 0000000..6953426
+--- /dev/null
++++ b/examples/reports.example.json
+@@ -0,0 +1,8 @@
++[
++  {"id":"progress-1","kind":"progress","taskId":"API","text":"ファイルを編集中です。次にテストします。"},
++  {"id":"progress-2","kind":"progress","taskId":"UI","text":"入力を受け付けました。"},
++  {"id":"question-1","kind":"question","taskId":"UI","text":"A案とB案のどちらを採用しますか？"},
++  {"id":"blocked-1","kind":"blocked","taskId":"API","text":"検証コマンドが失敗しました。"},
++  {"id":"completed-1","kind":"completed","taskId":"TEST","text":"確認が完了しました。"},
++  {"id":"scope-1","kind":"scope-change","taskId":"API","text":"依頼にない仕様変更が必要です。"}
++]
