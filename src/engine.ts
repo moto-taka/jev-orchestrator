@@ -160,7 +160,7 @@ export class Engine extends EventEmitter {
       if (candidate) { await this.runPolicy(task, candidate, 'task.repair', task.implementationGrant!.decisionId, signal); return; }
     }
     if (this.lean && task.phase === 'review' && this.canRepeatReview(task)) {
-      const candidate = this.candidates(task, {}).find(c => c.kind === 'REQUEST_REVIEW' && c.profileId === task.reviewGrant!.profileId);
+      const candidate = this.candidates(task, {}).find(c => c.kind === 'REQUEST_REVIEW' && c.profileId === task.reviewGrant!.profileId && c.effort === task.reviewGrant!.effort);
       if (candidate) { await this.runPolicy(task, candidate, 'task.review', task.reviewGrant!.decisionId, signal); return; }
     }
     if (this.lean && task.phase === 'verify' && task.finalVerificationPending && task.acceptanceGrant) {
@@ -321,7 +321,7 @@ export class Engine extends EventEmitter {
       return;
     }
     if (c.kind === 'CONTINUE_AFTER_PEER') {
-      invariant(c.profileId === task.profileId && c.sessionId === task.sessionId && !!task.sessionId, 'A reply must return to the original model/session');
+      invariant(c.profileId === task.profileId && c.sessionId === task.sessionId && c.effort === task.effort && !!task.sessionId, 'A reply must return to the original model/session/effort');
       for (const m of messages) invariant(m.kind === 'answer' && m.toTaskId === task.id && m.status === 'queued', 'Reply is not pending for this task');
       this.store.tx(() => { for (const m of messages) box.update(m.id, { status: 'submitted', deliveryOperation: op.id }); });
       await this.worker(task, op, 'implementer', signal, update => this.store.tx(() => {
@@ -576,7 +576,7 @@ export class Engine extends EventEmitter {
       && task.sameFailure < this.run.config.runtime.maxSameFailure
       && this.run.workerStarts < this.run.config.runtime.maxWorkerStarts
       && !task.lastReport?.questions.length && !this.mailbox.waiting(task)
-      && this.profiles('implementer').some(p => p.id === task.profileId);
+      && this.profiles('implementer').some(p => p.id === task.profileId && this.profileEfforts(p).includes(task.effort ?? 'default'));
   }
   private canRepeatReview(task: Task): boolean {
     const grant = task.reviewGrant, profile = this.profiles('reviewer').find(p => p.id === grant?.profileId);
