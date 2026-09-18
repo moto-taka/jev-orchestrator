@@ -238,10 +238,10 @@ export class Engine extends EventEmitter {
     const questions = choiceQuestion(task, representatives);
     if (this.lean) {
       for (const action of representatives) {
-        const profiles = [...new Set(candidates.filter(c => c.kind === action.kind && c.profileId).map(c => c.profileId!))];
-        if (profiles.length > 1) questions[`model_${action.kind}`] = { type: 'choice',
-          instructions: `Independently of whether action ${action.kind} is needed, choose a suitable allowed model for that role. Use supplied model metadata and the task evidence. Equal suitability is not a task blocker. Do not change a fixed existing session.`,
-          criteria: Object.fromEntries(profiles.map(id => [id, canonical(this.modelFacts(this.run.config.profiles.find(p => p.id === id)!))])) };
+        const assignments = candidates.filter(c => c.kind === action.kind && c.profileId);
+        if (assignments.length > 1) questions[`assignment_${action.kind}`] = { type: 'choice',
+          instructions: `Independently of whether action ${action.kind} is needed, choose the suitable allowed model AND reasoning effort for that role. Use the task evidence and model metadata. Prefer lower effort when it is sufficient; use higher effort for ambiguity, coupling, risk or difficult verification. Equal suitability is not a task blocker. Never change the model or effort of a fixed existing session.`,
+          criteria: Object.fromEntries(assignments.map(c => [c.id, canonical({ model: this.modelFacts(this.run.config.profiles.find(p => p.id === c.profileId)!), effort: c.effort ?? 'default' })])) };
       }
       if (task.phase === 'assess' && !task.assessments) Object.assign(questions, assessmentQuestions());
     }
@@ -249,11 +249,14 @@ export class Engine extends EventEmitter {
     if (!fresh) return;
     const answer = evaluation.answers.action; invariant(answer?.kind === 'choice', 'Jev did not choose an action');
     let chosen = representatives.find(c => c.id === answer.selected); invariant(chosen, 'Jev selected an unknown action');
-    const model = evaluation.answers[`model_${chosen.kind}`];
-    if (this.lean && questions[`model_${chosen.kind}`]) {
-      invariant(model?.kind === 'choice', 'Missing model selection');
-      const match = candidates.find(c => c.kind === chosen!.kind && c.profileId === model.selected);
-      invariant(match, 'Jev selected a model outside the allowed action profiles'); chosen = match;
+    if (this.lean) {
+      const assignments = candidates.filter(c => c.kind === chosen!.kind && c.profileId);
+      const assignment = evaluation.answers[`assignment_${chosen.kind}`];
+      if (questions[`assignment_${chosen.kind}`]) {
+        invariant(assignment?.kind === 'choice', 'Missing model/effort assignment');
+        const match = assignments.find(c => c.id === assignment.selected);
+        invariant(match, 'Jev selected a model/effort pair outside the allowed candidates'); chosen = match;
+      } else if (assignments.length === 1) chosen = assignments[0]!;
     }
     const approval = chosen.kind === 'ACCEPT_TASK' || chosen.kind === 'ACCEPT_PLAN';
     const threshold = approval ? task.requiredReviews > 1 ? this.run.config.thresholds.highRiskAccept : this.run.config.thresholds.accept : this.run.config.thresholds.route;
@@ -268,7 +271,7 @@ export class Engine extends EventEmitter {
     if (outcome === 'abstain') { this.store.updateRun(this.runId, { status: 'blocked', blockReason: 'Jev selection support is below the policy threshold; supply additional evidence. No automatic reroll.' }); this.log('abstain', '判断の確実性が不足しています。証拠を追加するか、設定を確認してください。', taskId); return; }
     if (committed) {
       const labels: Record<string, string> = { DELIVER_MESSAGE: 'エージェント間の配送を承認', REJECT_MESSAGE: 'メッセージを拒否', ANSWER_PEER: '担当者の回答を依頼', CONTINUE_AFTER_PEER: '返答を元セッションへ追加', START_TASK: '実装を依頼', REQUEST_SCOUT: '調査を依頼', REQUEST_PLAN: '計画案を依頼', ACCEPT_PLAN: '計画案を採用', REQUEST_EVIDENCE: '不足する根拠の確認を依頼', REQUEST_REVIEW: '独立レビューを依頼', REWORK_SAME_SESSION: '同じセッションへ修正を依頼', REASSIGN_TASK: '担当変更を選択', ACCEPT_TASK: '現在の検証結果を承認', STAGE_INTEGRATION: '統合作業場への反映を承認', ASK_USER: '利用者へ確認', PAUSE: '一時停止', CANCEL: '取消し' };
-      this.log('decision', `${labels[chosen.kind] ?? chosen.kind} · ${chosen.profileId ? this.profileDisplay(chosen.profileId) : task.spec.id}`, taskId); await this.executeOperation(op, signal);
+      this.log('decision', `${labels[chosen.kind] ?? chosen.kind} · ${chosen.profileId ? this.profileDisplay(chosen.profileId, undefined, chosen.effort) : task.spec.id}`, taskId); await this.executeOperation(op, signal);
     }
   }
   /** Only communication checkpoints bypass dependency readiness; they cannot edit. */
