@@ -81,7 +81,7 @@ export function agentCards(view: View | undefined): AgentCard[] {
 export function renderScreen(view: View | undefined, state: ScreenState, columns: number, rows: number): { lines: string[]; cursor: { row: number; column: number } } {
   const width = Math.max(20, columns - 2), height = Math.max(8, rows), run = view?.run;
   const lines: string[] = [];
-  lines.push(`  ▐▛██▜▌  jvo  0.3.0${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
+  lines.push(`  ▐▛██▜▌  jvo  0.3.1${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
   lines.push(`  ▝▜██▛▘  ${run ? basename(run.repo) : 'Jev Orchestrator'}  ·  ${run ? state.demo ? 'DEMO fixture / 本番API未使用' : `${run.config.decision.provider} / ${run.config.decision.model}` : '判断はJev、作業はお使いのCLIへ。'}`);
   lines.push(`    ▘▘    ${run ? `${labels[run.status] ?? run.status}  ·  ${run.id.slice(0, 16)}` : 'タスクを入力してください。 /help で操作を確認できます。'}`);
   lines.push('');
