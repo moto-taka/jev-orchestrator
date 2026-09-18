@@ -1,6 +1,6 @@
 import { stdin, stdout } from 'node:process';
 import type { View } from '../types.ts';
-import { COMMANDS, graphemes, renderScreen, type ScreenState } from './screen.ts';
+import { COMMANDS, agentCards, graphemes, renderScreen, type ScreenState } from './screen.ts';
 import { errorText } from '../util.ts';
 export interface Actions {
   submit(text: string): Promise<View | undefined>;
@@ -8,13 +8,16 @@ export interface Actions {
 }
 export async function terminalApp(actions: Actions, initial?: View, options: { demo?: boolean; subscribe?: (listener: (v: View) => void) => void } = {}): Promise<void> {
   if (!stdin.isTTY || !stdout.isTTY) throw new Error('Interactive mode needs a TTY. Use jvo run "task" --json, jvo replay, or jvo demo --json.');
-  let view = initial, state: ScreenState = { input: '', cursor: 0, panel: '', scroll: 0, demo: options.demo };
+  let view = initial, state: ScreenState = { input: '', cursor: 0, panel: '', scroll: 0, demo: options.demo, agentIndex: 0, agentFocus: false };
   const history: string[] = []; let historyIndex = 0, busy = false, finished = false, redrawTimer: NodeJS.Timeout | undefined, previous: string[] = [];
   let escapeBuffer = '', paste = false, pasteText = '';
   let escapeTimer: NodeJS.Timeout | undefined;
   const write = (s: string) => { stdout.write(s); };
   const redraw = () => {
     redrawTimer = undefined; if (finished) return;
+    const cards = agentCards(view);
+    if (!cards.length) { state.agentIndex = 0; state.agentFocus = false; }
+    else state.agentIndex = Math.max(0, Math.min(state.agentIndex ?? 0, cards.length - 1));
     const screen = renderScreen(view, state, stdout.columns || 100, stdout.rows || 30);
     let output = '\x1b[?2026h\x1b[?25l';
     for (let i = 0; i < Math.max(previous.length, screen.lines.length); i++) {
@@ -41,6 +44,7 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
     state.input = ''; state.cursor = 0; state.scroll = 0; state.notice = undefined;
     history.push(text); historyIndex = history.length; busy = true;
     try {
+      state.agentFocus = false;
       if (text.startsWith('/')) {
         const space = text.indexOf(' '), command = space < 0 ? text : text.slice(0, space), arg = space < 0 ? '' : text.slice(space + 1);
         if (['/agents', '/tasks', '/why', '/messages', '/usage', '/help'].includes(command)) { state.panel = state.panel === command ? '' : command; }
@@ -59,7 +63,11 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
       if (state.input) { state.input = ''; state.cursor = 0; }
       else { void actions.command('/pause', '').then(r => { view = r.view ?? view; state.notice = '停止しました。Ctrl+Dで終了できます。'; requestRender(); }).catch(e => { state.notice = errorText(e); requestRender(); }); }
     } else if (s === '\x04') { void actions.command('/exit', '').then(quit, e => { state.notice = errorText(e); quit(); }); }
-    else if (s === '\r' || s === '\n') void act();
+    else if (s === '\r' || s === '\n') {
+      const cards = agentCards(view);
+      if (!state.input.trim() && !state.panel && cards.length) { state.agentFocus = true; state.scroll = 0; }
+      else if (!state.agentFocus) void act();
+    }
     else if (s === '\x7f' || s === '\b') { const chars = graphemes(state.input); if (state.cursor > 0) { chars.splice(--state.cursor, 1); state.input = chars.join(''); } }
     else if (s === '\x1b[3~') { const chars = graphemes(state.input); chars.splice(state.cursor, 1); state.input = chars.join(''); }
     else if (s === '\x1b[D') state.cursor = Math.max(0, state.cursor - 1);
@@ -68,12 +76,30 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
     else if (s === '\x05' || s === '\x1b[F' || s === '\x1b[4~') state.cursor = graphemes(state.input).length;
     else if (s === '\x15') { state.input = graphemes(state.input).slice(state.cursor).join(''); state.cursor = 0; }
     else if (s === '\x0b') state.input = graphemes(state.input).slice(0, state.cursor).join('');
-    else if (s === '\x1b[A' || s === '\x1b[B') { historyIndex = Math.max(0, Math.min(history.length, historyIndex + (s.endsWith('A') ? -1 : 1))); state.input = history[historyIndex] ?? ''; state.cursor = graphemes(state.input).length; }
+    else if (s === '\x1b[A' || s === '\x1b[B') {
+      const cards = agentCards(view);
+      if (state.agentFocus && !state.input && cards.length) {
+        const delta = s.endsWith('A') ? -1 : 1;
+        state.agentIndex = (Math.max(0, state.agentIndex ?? 0) + delta + cards.length) % cards.length;
+        state.scroll = 0;
+      } else {
+        historyIndex = Math.max(0, Math.min(history.length, historyIndex + (s.endsWith('A') ? -1 : 1))); state.input = history[historyIndex] ?? ''; state.cursor = graphemes(state.input).length;
+      }
+    }
     else if (s === '\x1b[5~') state.scroll += Math.max(3, (stdout.rows || 30) - 12);
     else if (s === '\x1b[6~') state.scroll = Math.max(0, state.scroll - Math.max(3, (stdout.rows || 30) - 12));
-    else if (s === '\t') { const matches = COMMANDS.filter(c => c.startsWith(state.input)); if (matches.length === 1) { state.input = matches[0]!; state.cursor = state.input.length; } }
-    else if (s === '\x1b') { state.panel = ''; state.scroll = 0; }
-    else if (!/[\x00-\x1f\x7f]/.test(s)) insert(s);
+    else if (s === '\t' || s === '\x1b[Z') {
+      const cards = agentCards(view);
+      if ((state.agentFocus || !state.input) && !state.panel && cards.length) {
+        const delta = s === '\x1b[Z' ? -1 : 1;
+        state.agentIndex = (Math.max(0, state.agentIndex ?? 0) + delta + cards.length) % cards.length;
+        state.scroll = 0;
+      } else if (s === '\t') {
+        const matches = COMMANDS.filter(c => c.startsWith(state.input)); if (matches.length === 1) { state.input = matches[0]!; state.cursor = state.input.length; }
+      }
+    }
+    else if (s === '\x1b') { if (state.agentFocus) state.agentFocus = false; else state.panel = ''; state.scroll = 0; }
+    else if (!/[\x00-\x1f\x7f]/.test(s)) { if (state.agentFocus) state.notice = 'Escで親画面へ戻ってから入力してください。'; else insert(s); }
     requestRender();
   };
   const onData = (chunk: string) => {

@@ -155,8 +155,15 @@ export interface Operation {
   startedAt?: string; pid?: number; birth?: string; receipt?: string; error?: string;
 }
 export interface AgentEvent {
-  type: 'session' | 'text' | 'tool' | 'usage' | 'error' | 'done';
+  type: 'session' | 'model' | 'text' | 'tool' | 'usage' | 'error' | 'done';
   text?: string; sessionId?: string; model?: string; usage?: Usage; key?: string;
+}
+export interface AgentTrace {
+  invocationId: string; time: string; taskId: string; taskSpecId: string;
+  profileId: string; adapter: AdapterId; role: Role;
+  provider?: string; configuredModel?: string; observedModel?: string; sessionId?: string;
+  type: 'started' | 'session' | 'model' | 'text' | 'tool' | 'error' | 'done' | 'completed';
+  text?: string;
 }
 export interface Invocation {
   id: string; runId: string; taskId: string; role: Role; profile: Profile;
@@ -173,6 +180,7 @@ export interface AgentAdapter { run(invocation: Invocation): Promise<AgentResult
 export interface View {
   runtimeTransitions?: { rule: string; action: ActionKind; sourceDecisionId: string; state: Operation['state'] }[];
   messages?: PeerMessage[];
+  agentEvents?: AgentTrace[];
   run?: Run; tasks: Task[];
   events: { time: string; kind: string; text: string; taskId?: string }[];
   agents: Profile[]; usage: Usage[]; decisions: Decision[];

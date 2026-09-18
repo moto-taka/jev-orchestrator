@@ -20,12 +20,16 @@ export class EventParser {
     const emitText = (v: unknown, final = false) => {
       if (typeof v !== 'string') return;
       if (final) { this.text = v; this.lastAssistant = v; } else this.partial = (this.partial + v).slice(-2_000_000);
-      result.push({ type: 'text', text: v });
+      result.push({ type: 'text', text: v, key: final ? 'final' : 'delta' });
     };
     const session = (v: unknown) => { if (typeof v === 'string' && v.length < 1024 && !/[\x00-\x1f]/.test(v)) { this.sessionId = v; result.push({ type: 'session', sessionId: v }); } };
+    const model = (v: unknown) => { if (typeof v === 'string' && v.length < 300 && !/[\\x00-\\x1f]/.test(v) && v !== this.model) { this.model = v; result.push({ type: 'model', model: v, text: v }); } };
     const usage = (key: string, u: Usage) => { this.usage.set(key, u); result.push({ type: 'usage', key, usage: u }); };
+    if (typeof e.model === 'string') model(e.model);
+    if (typeof e.model_id === 'string') model(e.model_id);
+    if (typeof e.modelID === 'string') model(e.modelID);
     if (this.adapter === 'codex') {
-      if (e.type === 'thread.started') session(e.thread_id);
+      if (e.type === 'thread.started') { session(e.thread_id); model(e.model ?? e.model_id); }
       if (e.type === 'turn.started') { this.count++; this.done = false; }
       if (e.type === 'item.completed' || e.type === 'item.updated' || e.type === 'item.started') {
         const item = e.item ?? {};
@@ -36,10 +40,10 @@ export class EventParser {
       if (e.type === 'turn.failed' || e.type === 'error') this.failed = String(e.error?.message ?? e.message ?? 'Codex failed');
     } else if (this.adapter === 'claude') {
       if (e.session_id) session(e.session_id);
-      if (e.type === 'system' && e.model) this.model = String(e.model);
+      if (e.type === 'system' && e.model) model(e.model);
       if (e.type === 'assistant' && e.message) {
         const msg = e.message;
-        this.model = typeof msg.model === 'string' ? msg.model : this.model;
+        if (typeof msg.model === 'string') model(msg.model);
         const content = Array.isArray(msg.content) ? msg.content : [];
         const texts = content.filter((c: Obj) => c.type === 'text').map((c: Obj) => c.text).join('');
         if (texts) emitText(texts, true);
@@ -64,7 +68,7 @@ export class EventParser {
       }
       if (e.type === 'message_end' && e.message?.role === 'assistant') {
         const msg = e.message, key = `message:${msg.timestamp ?? hash(msg)}`;
-        this.model = typeof msg.model === 'string' ? msg.model : this.model;
+        if (typeof msg.model === 'string') model(msg.model);
         const t = Array.isArray(msg.content) ? msg.content.filter((c: Obj) => c.type === 'text').map((c: Obj) => c.text).join('') : '';
         if (t) emitText(t, true);
         if (msg.usage) usage(key, piUsage(msg.usage));
