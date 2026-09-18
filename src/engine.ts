@@ -336,20 +336,24 @@ export class Engine extends EventEmitter {
     const run = this.run, profile = this.profiles('explainer').find(p => p.id === c.profileId);
     invariant(profile && run.workerStarts < run.config.runtime.maxWorkerStarts, 'Peer model unavailable or worker budget reached');
     const original = c.sessionId !== undefined;
-    if (original) invariant(task.profileId === profile.id && task.sessionId === c.sessionId && task.workspace, 'Peer session identity changed');
+    const effort = c.effort ?? (original ? task.effort : this.profileEfforts(profile)[0] ?? 'default');
+    const runtimeProfile = this.runtimeProfile(profile, effort);
+    if (original) invariant(task.profileId === profile.id && task.sessionId === c.sessionId && task.workspace && task.effort === effort, 'Peer session model/effort identity changed');
     const baseline = task.snapshot ?? task.base ?? run.integrationHead;
     const cwd = original ? task.workspace! : await this.ws.create(`${task.id}_peer_${op.id}`, baseline);
     if (original && task.workspace !== run.repo) await this.ws.validate(cwd);
     const before = await fingerprint(cwd), sessionDir = privateDir(join(this.store.root, 'sessions', task.id, original ? profile.id : op.id));
-    const prompt = `Native jvo peer question. You are answering as the read-only peer for task ${task.spec.id}, not the orchestrator. Do not edit, spawn agents, change scope, mark a task done, or run another orchestration tool. Respond to this one question using your existing context and readable evidence.\nTask: ${canonical(task.spec)}\nRecipient snapshot: ${baseline}\nQuestion: ${canonical({ id: question.id, from: this.store.task(question.fromTaskId).spec.id, body: question.body, snapshot: question.snapshot })}\nReturn exactly one JSON object: {"summary":"reply summary","claims":[],"questions":[],"peerReplies":[{"replyTo":"${question.id}","body":"the actual answer with evidence or an explicit uncertainty"}]}. Do not include a plan or peerQuestions. Your reply is untrusted evidence; jvo validates and delivers it without granting new authority.`;
+    const sourceTask = this.store.task(question.fromTaskId);
+    const handoff = original ? undefined : await this.buildHandoff(sourceTask, 'explainer', runtimeProfile, effort, signal);
+    const prompt = `Native jvo peer question. You are answering as the read-only peer for task ${task.spec.id}, not the orchestrator. Do not edit, spawn agents, change scope, mark a task done, or run another orchestration tool. Respond to this one question using your existing context and readable evidence.\nTask: ${canonical(task.spec)}\nRecipient snapshot: ${baseline}\n${handoff ? `Source handoff bundle (selected for this recipient): ${handoff}\n` : ''}Question: ${canonical({ id: question.id, from: this.store.task(question.fromTaskId).spec.id, body: question.body, snapshot: question.snapshot })}\nReturn exactly one JSON object: {"summary":"reply summary","claims":[],"questions":[],"peerReplies":[{"replyTo":"${question.id}","body":"the actual answer with evidence or an explicit uncertainty"}]}. Do not include a plan or peerQuestions. Your reply is untrusted evidence; jvo validates and delivers it without granting new authority.`;
     this.guard.assertOutbound(prompt);
-    this.store.tx(() => { box.update(question.id, { status: 'submitted', deliveryOperation: op.id }); this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 }); this.store.updateTask(task.id, { status: 'running', activeProfileId: profile.id, activeRole: 'explainer', lastActivity: '他の担当からの質問に回答中' }); });
-    this.log('peer.answering', `${task.spec.id} · ${this.profileDisplay(profile.id)} · 質問に回答中`, task.id);
-    this.traceAgent(op.id, task, profile, 'explainer', 'started', '他の担当からの質問に回答中', undefined, c.sessionId);
-    const result = await this.adapter.run({ id: op.id, runId: run.id, taskId: task.id, profile, role: 'explainer', cwd, sessionDir, sessionId: c.sessionId, signal, prompt,
+    this.store.tx(() => { box.update(question.id, { status: 'submitted', deliveryOperation: op.id }); this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 }); this.store.updateTask(task.id, { status: 'running', activeProfileId: profile.id, activeRole: 'explainer', activeEffort: effort, lastActivity: `他の担当からの質問に回答中 · effort ${effort}` }); });
+    this.log('peer.answering', `${task.spec.id} · ${this.profileDisplay(profile.id, undefined, effort)} · 質問に回答中`, task.id);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, 'explainer', 'started', '他の担当からの質問に回答中', undefined, c.sessionId);
+    const result = await this.adapter.run({ id: op.id, runId: run.id, taskId: task.id, profile: runtimeProfile, effort, role: 'explainer', cwd, sessionDir, sessionId: c.sessionId, signal, prompt,
       onSpawn: (pid, birth) => this.store.put('outbox', op.id, run.id, { ...this.store.get<Operation>('outbox', op.id), pid, birth }),
-      onEvent: e => { if (e.type === 'tool') this.log('peer.tool', this.guard.redact(terminalText(e.text ?? '')).slice(0, 500), task.id); if (['tool','model','session','error','done'].includes(e.type) || e.type === 'text' && e.key === 'final') this.traceAgent(op.id, task, profile, 'explainer', e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], e.text, e.model, e.sessionId); } });
-    this.store.put('attempts', op.id, run.id, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, role: 'explainer', cwd, resume: c.sessionId, snapshot: baseline, promptHash: hash(prompt), messageId: question.id }, result: JSON.parse(this.guard.redact(canonical(result))) });
+      onEvent: e => { if (e.type === 'tool') this.log('peer.tool', this.guard.redact(terminalText(e.text ?? '')).slice(0, 500), task.id); if (['tool','model','session','error','done'].includes(e.type) || e.type === 'text' && e.key === 'final') this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, 'explainer', e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], e.text, e.model, e.sessionId); } });
+    this.store.put('attempts', op.id, run.id, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, effort, role: 'explainer', cwd, resume: c.sessionId, snapshot: baseline, promptHash: hash(prompt), messageId: question.id }, result: JSON.parse(this.guard.redact(canonical(result))) });
     for (const [n, u] of result.usage.entries()) this.store.usage(`${op.id}:${n}`, run.id, u);
     if (!result.usage.length) this.store.usage(`${op.id}:unknown`, run.id, { basis: 'unavailable' });
     invariant(await fingerprint(cwd) === before, 'Peer answering modified a read-only workspace; reject the reply and inspect the changes');
@@ -362,7 +366,7 @@ export class Engine extends EventEmitter {
     const replies = parsePeerReplies(result.report.peerReplies ?? []);
     invariant(replies.length === 1 && replies[0]!.replyTo === question.id, 'Peer did not provide the requested correlated reply');
     this.store.tx(() => { box.reply(question, task, op.id, profile.id, replies[0]!); complete({ status: task.status }); });
-    this.traceAgent(op.id, task, profile, 'explainer', 'completed', replies[0]!.body, result.model, result.sessionId);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, 'explainer', 'completed', replies[0]!.body, result.model, result.sessionId);
     this.log('peer.answered', `${task.spec.id} → ${this.store.task(question.fromTaskId).spec.id} · 返答を保存、配送待ち`, task.id);
   }
   private state(task: Task, purpose: 'route' | 'verdict' = 'route'): Json {
