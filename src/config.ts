@@ -63,6 +63,7 @@ function validateProfile(value: unknown): void {
   if (p.modelDescription !== undefined) text(p.modelDescription, 'model description', 2000);
   if (p.modelSource !== undefined) invariant(['cli','saved','alias'].includes(String(p.modelSource)), 'Invalid model source');
   if (p.contextWindow !== undefined) integer(p.contextWindow, 'context window', 1, 100_000_000);
+  if (p.efforts !== undefined) invariant(Array.isArray(p.efforts) && p.efforts.length > 0 && p.efforts.length <= 8 && p.efforts.every((v: unknown) => ['default','off','minimal','low','medium','high','xhigh','max'].includes(String(v))), 'Invalid profile efforts');
   if (p.tier !== undefined) invariant(['fast', 'standard', 'deep', 'review'].includes(String(p.tier)), 'Invalid profile tier');
   invariant(Array.isArray(p.roles) && p.roles.length > 0 && p.roles.every(r => ['scout', 'planner', 'implementer', 'reviewer', 'explainer'].includes(r)), 'Invalid profile roles');
   invariant(['managed', 'trusted-local', 'assisted', 'unavailable'].includes(text(p.level)) && typeof p.enabled === 'boolean', 'Invalid management level');
