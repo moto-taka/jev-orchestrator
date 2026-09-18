@@ -4,7 +4,7 @@ import { mkdtempSync, copyFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { discoverModels, parsePiModels, parsePiTable, modelOption, scopedProfiles, matchesScope } from '../src/models/catalog.ts';
+import { discoverModels, parsePiModels, parsePiTable, parseCodexModels, modelOption, scopedProfiles, matchesScope } from '../src/models/catalog.ts';
 import { PickerState } from '../src/models/picker.ts';
 import { Prompter, setupModels } from '../src/setup.ts';
 import { defaults } from '../src/config.ts';
@@ -59,4 +59,35 @@ test('cancelled model selection does not overwrite existing configuration', asyn
   const config=defaults(), prompts=new SelectPrompt(); prompts.cancelled=true; let saved=false;
   await assert.rejects(()=>setupModels(config,prompts,{detect:async()=>[capability('pi')],discover:async()=>({models:[modelOption('pi','one','p')],warnings:[]}),save:()=>{saved=true;}}),/cancel/);
   assert.equal(saved,false); assert.deepEqual(config.profiles,[]);
+});
+
+
+test('model catalogs preserve only supported reasoning effort choices', () => {
+  const pi = parsePiModels([{
+    provider: 'p', id: 'reasoner', reasoning: true,
+    thinkingLevelMap: { high: null, xhigh: 24576 }
+  }])[0]!;
+  assert.deepEqual(pi.efforts, ['off','minimal','low','medium','xhigh']);
+  const plain = parsePiModels([{ provider: 'p', id: 'plain', reasoning: false }])[0]!;
+  assert.deepEqual(plain.efforts, ['off']);
+
+  const codex = parseCodexModels([{
+    id: 'm', model: 'gpt-fixture',
+    supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }, { reasoningEffort: 'unsupported' }]
+  }])[0]!;
+  assert.deepEqual(codex.efforts, ['low','high']);
+});
+
+test('selected effort is translated only through CLI-supported native flags', () => {
+  const codex = invocation('codex'); codex.profile.thinking = 'high';
+  const codexCommand = invocationCommand(codex);
+  assert(codexCommand.argv.includes('model_reasoning_effort="high"'));
+
+  const pi = invocation('pi'); pi.profile.thinking = 'medium';
+  const piCommand = invocationCommand(pi);
+  const at = piCommand.argv.indexOf('--thinking');
+  assert(at >= 0); assert.equal(piCommand.argv[at + 1], 'medium');
+
+  const claude = invocation('claude'); claude.profile.thinking = undefined;
+  assert(!invocationCommand(claude).argv.includes('--thinking'));
 });
