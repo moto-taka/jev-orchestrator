@@ -730,7 +730,7 @@ export class Engine extends EventEmitter {
     }
     op = { ...op, state: 'running', startedAt: now() }; this.store.put('outbox', op.id, this.runId, op);
     const complete = (update: Partial<Task> = {}) => this.store.tx(() => {
-      this.store.updateTask(task.id, { ...update, activeOperation: undefined, activeProfileId: undefined, activeRole: undefined });
+      this.store.updateTask(task.id, { ...update, activeOperation: undefined, activeProfileId: undefined, activeRole: undefined, activeEffort: undefined });
       this.store.put('outbox', op.id, this.runId, { ...this.store.get<Operation>('outbox', op.id), state: 'done', receipt: hash(update) });
       this.store.event(this.runId, 'operation.completed', { taskId: task.id, action: c.kind, operation: op.id });
     });
