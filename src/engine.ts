@@ -214,7 +214,7 @@ export class Engine extends EventEmitter {
       for (const finding of task.findings.filter(f => !this.lean || (!f.duplicateOf && !['fixed', 'not-applicable'].includes(f.status))).slice(-50)) questions[`finding_${hash(finding.id).slice(0, 12)}`] = { type: 'choice', instructions: `Using the actual current-snapshot proof, classify finding ${finding.id}: ${finding.requirement}. Do not trust a worker's self-asserted fix.`, criteria: { fixed: 'The defect is demonstrably fixed and verified.', 'not-applicable': 'The finding is demonstrably not applicable to the approved requirement.', open: 'The concern remains or proof is insufficient.', disputed: 'The evidence is contradictory and needs independent investigation.' } };
       const verdict = { id: `verdict-${task.id}-${task.snapshot}`, kind: 'ACCEPT_TASK' as const,
         taskId: task.id, reason: 'Current-snapshot evidence satisfies the acceptance rubric', evidenceIds: task.evidence.map(e => e.id) };
-      const state = this.lean ? json({ ...this.state(task, 'verdict') as object, candidates: [verdict] }) : this.state(task);
+      const state = this.lean ? json({ reviewGate: this.reviewGateState(task), candidates: [verdict] }) : this.state(task);
       const result = await this.evaluate(task, state, questions, signal);
       if (!result.fresh) return;
       assessments = result.evaluation.answers;
