@@ -17,12 +17,21 @@ export class DemoProvider implements DecisionProvider {
   async evaluate(state: Json, questions: Record<string, Question>): Promise<Evaluation> {
     const context = state as Record<string, any>, answers: Evaluation['answers'] = {};
     for (const [key, q] of Object.entries(questions)) {
-      if (q.type === 'boolean') answers[key] = { kind: 'boolean', probability: context.testsPassed === false ? 0.01 : 0.99 };
-      else if (q.type === 'score') answers[key] = { kind: 'score', value: 0, levels: q.criteria, probabilities: Object.fromEntries(q.criteria.map((_, i) => [String(i), i === 0 ? 1 : 0])), confidence: 1 };
-      else {
+      if (q.type === 'boolean') {
+        answers[key] = { kind: 'boolean', probability: context.testsPassed === false ? 0.01 : 0.99 };
+      } else if (q.type === 'score') {
+        const high = key === 'correctnessQuality' || key === 'maintainabilityAdvisory';
+        const index = high ? q.criteria.length - 1 : 0;
+        answers[key] = { kind: 'score', value: index, levels: q.criteria,
+          probabilities: Object.fromEntries(q.criteria.map((_, i) => [String(i), i === index ? 1 : 0])), confidence: 1 };
+      } else {
         const cs = (context.candidates ?? []) as Candidate[];
         const order = ['ACCEPT_TASK', 'STAGE_INTEGRATION', 'REWORK_SAME_SESSION', 'START_TASK', 'REQUEST_REVIEW', 'ACCEPT_PLAN', 'ASK_USER'];
-        const selected = key.startsWith('model_') ? Object.keys(q.criteria)[0]! : key.startsWith('finding_') ? (context.testsPassed === true ? 'fixed' : 'open') : order.map(kind => cs.find(c => c.kind === kind)).find(Boolean)?.id ?? Object.keys(q.criteria)[0]!;
+        let selected: string;
+        if (key.startsWith('assignment_') || key.startsWith('handoff_')) selected = Object.keys(q.criteria)[0]!;
+        else if (key.startsWith('finding_')) selected = context.testsPassed === true || context.reviewGate ? 'fixed' : 'open';
+        else if (key === 'securityGate' || key === 'compatibilityGate') selected = 'safe';
+        else selected = order.map(kind => cs.find(c => c.kind === kind)).find(Boolean)?.id ?? Object.keys(q.criteria)[0]!;
         answers[key] = { kind: 'choice', selected, probabilities: Object.fromEntries(Object.keys(q.criteria).map(k => [k, k === selected ? 1 : 0])), confidence: 1 };
       }
     }

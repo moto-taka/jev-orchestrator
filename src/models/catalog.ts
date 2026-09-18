@@ -13,9 +13,32 @@ import type { AdapterId, Capabilities, Profile } from '../types.ts';
 export interface ModelOption {
   id: string; adapter: AdapterId; model: string; provider?: string;
   name: string; description?: string; source: 'cli' | 'saved' | 'alias';
-  contextWindow?: number; reasoning?: boolean; isDefault?: boolean;
+  contextWindow?: number; reasoning?: boolean; efforts?: string[]; isDefault?: boolean;
 }
 export interface ModelCatalog { models: ModelOption[]; warnings: string[]; }
+const EFFORTS = ['off','minimal','low','medium','high','xhigh','max'] as const;
+function effortList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  for (const item of value) {
+    const raw = typeof item === 'string' ? item : item && typeof item === 'object'
+      ? (item as Record<string, unknown>).reasoningEffort ?? (item as Record<string, unknown>).effort ?? (item as Record<string, unknown>).value
+      : undefined;
+    if (typeof raw === 'string' && (EFFORTS as readonly string[]).includes(raw) && !result.includes(raw)) result.push(raw);
+  }
+  return result;
+}
+function piEfforts(m: Record<string, any>): string[] {
+  if (m.reasoning !== true) return ['off'];
+  const map = m.thinkingLevelMap;
+  if (map && typeof map === 'object' && !Array.isArray(map)) {
+    const values = map as Record<string, unknown>;
+    const standard = ['off','minimal','low','medium','high'].filter(level => !Object.hasOwn(values, level) || values[level] !== null);
+    const extended = ['xhigh','max'].filter(level => Object.hasOwn(values, level) && values[level] !== null);
+    return [...standard, ...extended];
+  }
+  return ['off','minimal','low','medium','high'];
+}
 export const modelKey = (adapter: AdapterId, provider: string | undefined, model: string) => `${adapter}_${hash({ provider: provider ?? '', model }).slice(0, 20)}`;
 export function modelOption(adapter: AdapterId, model: string, provider?: string, fields: Partial<ModelOption> = {}): ModelOption {
   invariant(model.length > 0 && model.length <= 160 && !/[\x00-\x1f\x7f]/.test(model), 'Invalid model ID');
@@ -75,7 +98,7 @@ export function parsePiModels(value: unknown): ModelOption[] {
   return uniqueModels(value.map(x => {
     const m = object(x), model = text(m.id, 'model', 160), provider = text(m.provider, 'provider', 160);
     return modelOption('pi', model, provider, { name: typeof m.name === 'string' ? m.name : model,
-      contextWindow: typeof m.contextWindow === 'number' ? m.contextWindow : undefined, reasoning: typeof m.reasoning === 'boolean' ? m.reasoning : undefined });
+      contextWindow: typeof m.contextWindow === 'number' ? m.contextWindow : undefined, reasoning: typeof m.reasoning === 'boolean' ? m.reasoning : undefined, efforts: piEfforts(m) });
   }));
 }
 export function parsePiTable(output: string): ModelOption[] {
@@ -86,7 +109,7 @@ export function parsePiTable(output: string): ModelOption[] {
     const match = /^(\S+)\s+(\S+)\s+(\d+(?:\.\d+)?[KM]?)\s+\d+(?:\.\d+)?[KM]?\s+(yes|no)\s+(?:yes|no)\s*$/.exec(line.trim());
     if (!match) continue;
     const v = match[3]!, n = parseFloat(v) * (v.endsWith('M') ? 1e6 : v.endsWith('K') ? 1e3 : 1);
-    result.push(modelOption('pi', match[2]!, match[1]!, { contextWindow: n, reasoning: match[4] === 'yes' }));
+    result.push(modelOption('pi', match[2]!, match[1]!, { contextWindow: n, reasoning: match[4] === 'yes', efforts: match[4] === 'yes' ? ['off','minimal','low','medium','high'] : ['off'] }));
   }
   return uniqueModels(result);
 }
@@ -96,7 +119,8 @@ export function parseCodexModels(value: unknown, provider?: string): ModelOption
     const m = object(x), model = text(m.model ?? m.id, 'model', 160);
     return modelOption('codex', model, provider, { name: typeof m.displayName === 'string' ? m.displayName : model,
       description: typeof m.description === 'string' ? m.description.slice(0, 500) : undefined, isDefault: m.isDefault === true,
-      reasoning: Array.isArray(m.supportedReasoningEfforts) && m.supportedReasoningEfforts.length > 0 });
+      reasoning: Array.isArray(m.supportedReasoningEfforts) && m.supportedReasoningEfforts.length > 0,
+      efforts: effortList(m.supportedReasoningEfforts) });
   });
 }
 export function parseClaudeModels(value: unknown): ModelOption[] {
@@ -129,7 +153,7 @@ export async function discoverModels(cap: Capabilities, options: { globalPiProvi
       }
     } else if (cap.adapter === 'codex') {
       channel = new MetadataChannel(cap.binary, ['app-server'], cwd, env, options.timeoutMs);
-      await channel.request('init', { id: 'init', method: 'initialize', params: { clientInfo: { name: 'jvo_model_picker', title: 'Jev Orchestrator model picker', version: '0.3.2' } } });
+      await channel.request('init', { id: 'init', method: 'initialize', params: { clientInfo: { name: 'jvo_model_picker', title: 'Jev Orchestrator model picker', version: '0.4.0' } } });
       channel.send({ method: 'initialized', params: {} });
       let provider: string | undefined;
       try {
@@ -168,9 +192,9 @@ export function scopedProfiles(cap: Capabilities, models: ModelOption[], previou
     const p = profileFrom(cap); p.id = m.id;
     if (m.model !== 'default') p.model = m.model;
     if (m.provider) p.provider = m.provider;
-    if (prior?.thinking) p.thinking = prior.thinking;
     p.modelName = m.name; p.modelDescription = m.description; p.modelSource = m.source;
-    p.contextWindow = m.contextWindow; p.reasoning = m.reasoning;
+    p.contextWindow = m.contextWindow; p.reasoning = m.reasoning; p.efforts = m.efforts?.length ? m.efforts : prior?.efforts;
+    if (!p.efforts?.length && prior?.thinking) p.efforts = [prior.thinking];
     if (cap.adapter === 'pi') p.globalPiProviders = globalPiProviders;
     // The user chooses the allowed pool, not permanent tiers or role assignments.
     // The engine's Jev candidates bind one pool entry to one runtime role.

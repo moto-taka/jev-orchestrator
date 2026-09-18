@@ -38,7 +38,7 @@ test('ambiguous model preference does not block a clear action; Jev still select
   f.store.updateRun(f.engine.runId,{config});
   const provider = { identity:'tied-model-fixture', async evaluate(s:Json,qs:Record<string,Question>):Promise<Evaluation> {
     const result = await base.evaluate(s,qs);
-    for (const [key,q] of Object.entries(qs)) if (key.startsWith('model_') && q.type==='choice') {
+    for (const [key,q] of Object.entries(qs)) if (key.startsWith('assignment_') && q.type==='choice') {
       const ids=Object.keys(q.criteria); result.answers[key]={kind:'choice',selected:ids.at(-1)!,confidence:0,probabilities:Object.fromEntries(ids.map(id=>[id,1/ids.length]))};
     }
     if(qs.action?.type==='choice') assert(Object.keys(qs.action.criteria).length<=10,'Actions must not multiply with models');

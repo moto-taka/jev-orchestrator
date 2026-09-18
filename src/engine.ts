@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import type { AgentAdapter, AgentTrace, Candidate, Config, Decision, DecisionProvider, Evaluation, Evidence, Invocation, Json, Operation, Profile, Question, Role, Run, PeerMessage, Task, TaskSpec, Trust, View, WorkerReport } from './types.ts';
+import type { AgentAdapter, AgentTrace, Candidate, Config, Decision, DecisionProvider, Evaluation, Evidence, HandoffBundle, Invocation, Json, Operation, Profile, Question, Role, Run, PeerMessage, Task, TaskSpec, Trust, View, WorkerReport } from './types.ts';
 import { Store } from './storage.ts';
 import { Workspaces, assertChanges, changedPaths, dirty, fingerprint, git, repository } from './workspaces.ts';
 import { canonical, clip, errorText, hash, id, invariant, json, now, privateDir, safeChild } from './util.ts';
@@ -71,7 +71,8 @@ export class Engine extends EventEmitter {
         invocationId: String(d.invocationId ?? ''), time: e.time, taskId: String(d.taskId ?? ''), taskSpecId: String(d.taskSpecId ?? ''),
         profileId: String(d.profileId ?? ''), adapter: String(d.adapter ?? 'codex') as AgentTrace['adapter'], role: String(d.role ?? 'implementer') as Role,
         provider: typeof d.provider === 'string' ? d.provider : undefined, configuredModel: typeof d.configuredModel === 'string' ? d.configuredModel : undefined,
-        observedModel: typeof d.observedModel === 'string' ? d.observedModel : undefined, sessionId: typeof d.sessionId === 'string' ? d.sessionId : undefined,
+        observedModel: typeof d.observedModel === 'string' ? d.observedModel : undefined, effort: typeof d.effort === 'string' ? d.effort : undefined,
+        sessionId: typeof d.sessionId === 'string' ? d.sessionId : undefined,
         type: String(d.type ?? 'text') as AgentTrace['type'], text: typeof d.text === 'string' ? terminalText(d.text) : undefined,
       };
     }).filter(e => e.invocationId && e.taskId && e.profileId);
@@ -81,18 +82,18 @@ export class Engine extends EventEmitter {
       events: journal.filter(e => e.kind !== 'agent.trace').slice(-200).filter(e => typeof e.data.text === 'string' && e.data.text.length > 0)
         .map(e => ({ time: e.time, kind: e.kind, taskId: typeof e.data.taskId === 'string' ? e.data.taskId : undefined, text: terminalText(String(e.data.text)) })) };
   }
-  private profileDisplay(profileId?: string, observedModel?: string): string {
+  private profileDisplay(profileId?: string, observedModel?: string, effort?: string): string {
     const p = this.run.config.profiles.find(profile => profile.id === profileId);
     if (!p) return profileId ?? '未割当';
     const names: Record<string, string> = { codex: 'Codex', claude: 'Claude', pi: 'Pi', opencode: 'OpenCode' };
     let model = observedModel ?? p.model;
     if (model && p.provider && !model.startsWith(p.provider + '/')) model = p.provider + '/' + model;
-    return `${names[p.adapter] ?? p.adapter} · ${model ?? 'default / 未観測'}`;
+    return `${names[p.adapter] ?? p.adapter} · ${model ?? 'default / 未観測'}${effort && effort !== 'default' ? ` · ${effort}` : ''}`;
   }
   private traceAgent(invocationId: string, task: Task, profile: Profile, role: Role, type: AgentTrace['type'], text?: string, observedModel?: string, sessionId?: string): void {
     this.store.event(this.runId, 'agent.trace', {
       invocationId, taskId: task.id, taskSpecId: task.spec.id, profileId: profile.id, adapter: profile.adapter, role,
-      provider: profile.provider, configuredModel: profile.model, observedModel: observedModel ?? task.observedModel,
+      provider: profile.provider, configuredModel: profile.model, observedModel: observedModel ?? task.observedModel, effort: task.activeEffort ?? task.effort ?? profile.thinking,
       sessionId: sessionId ?? task.sessionId, type, text: text === undefined ? undefined : this.guard.redact(terminalText(text)).slice(0, 5000),
     });
     this.notify();
@@ -160,7 +161,7 @@ export class Engine extends EventEmitter {
       if (candidate) { await this.runPolicy(task, candidate, 'task.repair', task.implementationGrant!.decisionId, signal); return; }
     }
     if (this.lean && task.phase === 'review' && this.canRepeatReview(task)) {
-      const candidate = this.candidates(task, {}).find(c => c.kind === 'REQUEST_REVIEW' && c.profileId === task.reviewGrant!.profileId);
+      const candidate = this.candidates(task, {}).find(c => c.kind === 'REQUEST_REVIEW' && c.profileId === task.reviewGrant!.profileId && c.effort === task.reviewGrant!.effort);
       if (candidate) { await this.runPolicy(task, candidate, 'task.review', task.reviewGrant!.decisionId, signal); return; }
     }
     if (this.lean && task.phase === 'verify' && task.finalVerificationPending && task.acceptanceGrant) {
@@ -214,7 +215,7 @@ export class Engine extends EventEmitter {
       for (const finding of task.findings.filter(f => !this.lean || (!f.duplicateOf && !['fixed', 'not-applicable'].includes(f.status))).slice(-50)) questions[`finding_${hash(finding.id).slice(0, 12)}`] = { type: 'choice', instructions: `Using the actual current-snapshot proof, classify finding ${finding.id}: ${finding.requirement}. Do not trust a worker's self-asserted fix.`, criteria: { fixed: 'The defect is demonstrably fixed and verified.', 'not-applicable': 'The finding is demonstrably not applicable to the approved requirement.', open: 'The concern remains or proof is insufficient.', disputed: 'The evidence is contradictory and needs independent investigation.' } };
       const verdict = { id: `verdict-${task.id}-${task.snapshot}`, kind: 'ACCEPT_TASK' as const,
         taskId: task.id, reason: 'Current-snapshot evidence satisfies the acceptance rubric', evidenceIds: task.evidence.map(e => e.id) };
-      const state = this.lean ? json({ ...this.state(task, 'verdict') as object, candidates: [verdict] }) : this.state(task);
+      const state = this.lean ? json({ reviewGate: this.reviewGateState(task), candidates: [verdict] }) : this.state(task);
       const result = await this.evaluate(task, state, questions, signal);
       if (!result.fresh) return;
       assessments = result.evaluation.answers;
@@ -238,10 +239,10 @@ export class Engine extends EventEmitter {
     const questions = choiceQuestion(task, representatives);
     if (this.lean) {
       for (const action of representatives) {
-        const profiles = [...new Set(candidates.filter(c => c.kind === action.kind && c.profileId).map(c => c.profileId!))];
-        if (profiles.length > 1) questions[`model_${action.kind}`] = { type: 'choice',
-          instructions: `Independently of whether action ${action.kind} is needed, choose a suitable allowed model for that role. Use supplied model metadata and the task evidence. Equal suitability is not a task blocker. Do not change a fixed existing session.`,
-          criteria: Object.fromEntries(profiles.map(id => [id, canonical(this.modelFacts(this.run.config.profiles.find(p => p.id === id)!))])) };
+        const assignments = candidates.filter(c => c.kind === action.kind && c.profileId);
+        if (assignments.length > 1) questions[`assignment_${action.kind}`] = { type: 'choice',
+          instructions: `Independently of whether action ${action.kind} is needed, choose the suitable allowed model AND reasoning effort for that role. Use the task evidence and model metadata. Prefer lower effort when it is sufficient; use higher effort for ambiguity, coupling, risk or difficult verification. Equal suitability is not a task blocker. Never change the model or effort of a fixed existing session.`,
+          criteria: Object.fromEntries(assignments.map(c => [c.id, canonical({ model: this.modelFacts(this.run.config.profiles.find(p => p.id === c.profileId)!), effort: c.effort ?? 'default' })])) };
       }
       if (task.phase === 'assess' && !task.assessments) Object.assign(questions, assessmentQuestions());
     }
@@ -249,11 +250,14 @@ export class Engine extends EventEmitter {
     if (!fresh) return;
     const answer = evaluation.answers.action; invariant(answer?.kind === 'choice', 'Jev did not choose an action');
     let chosen = representatives.find(c => c.id === answer.selected); invariant(chosen, 'Jev selected an unknown action');
-    const model = evaluation.answers[`model_${chosen.kind}`];
-    if (this.lean && questions[`model_${chosen.kind}`]) {
-      invariant(model?.kind === 'choice', 'Missing model selection');
-      const match = candidates.find(c => c.kind === chosen!.kind && c.profileId === model.selected);
-      invariant(match, 'Jev selected a model outside the allowed action profiles'); chosen = match;
+    if (this.lean) {
+      const assignments = candidates.filter(c => c.kind === chosen!.kind && c.profileId);
+      const assignment = evaluation.answers[`assignment_${chosen.kind}`];
+      if (questions[`assignment_${chosen.kind}`]) {
+        invariant(assignment?.kind === 'choice', 'Missing model/effort assignment');
+        const match = assignments.find(c => c.id === assignment.selected);
+        invariant(match, 'Jev selected a model/effort pair outside the allowed candidates'); chosen = match;
+      } else if (assignments.length === 1) chosen = assignments[0]!;
     }
     const approval = chosen.kind === 'ACCEPT_TASK' || chosen.kind === 'ACCEPT_PLAN';
     const threshold = approval ? task.requiredReviews > 1 ? this.run.config.thresholds.highRiskAccept : this.run.config.thresholds.accept : this.run.config.thresholds.route;
@@ -268,7 +272,7 @@ export class Engine extends EventEmitter {
     if (outcome === 'abstain') { this.store.updateRun(this.runId, { status: 'blocked', blockReason: 'Jev selection support is below the policy threshold; supply additional evidence. No automatic reroll.' }); this.log('abstain', '判断の確実性が不足しています。証拠を追加するか、設定を確認してください。', taskId); return; }
     if (committed) {
       const labels: Record<string, string> = { DELIVER_MESSAGE: 'エージェント間の配送を承認', REJECT_MESSAGE: 'メッセージを拒否', ANSWER_PEER: '担当者の回答を依頼', CONTINUE_AFTER_PEER: '返答を元セッションへ追加', START_TASK: '実装を依頼', REQUEST_SCOUT: '調査を依頼', REQUEST_PLAN: '計画案を依頼', ACCEPT_PLAN: '計画案を採用', REQUEST_EVIDENCE: '不足する根拠の確認を依頼', REQUEST_REVIEW: '独立レビューを依頼', REWORK_SAME_SESSION: '同じセッションへ修正を依頼', REASSIGN_TASK: '担当変更を選択', ACCEPT_TASK: '現在の検証結果を承認', STAGE_INTEGRATION: '統合作業場への反映を承認', ASK_USER: '利用者へ確認', PAUSE: '一時停止', CANCEL: '取消し' };
-      this.log('decision', `${labels[chosen.kind] ?? chosen.kind} · ${chosen.profileId ? this.profileDisplay(chosen.profileId) : task.spec.id}`, taskId); await this.executeOperation(op, signal);
+      this.log('decision', `${labels[chosen.kind] ?? chosen.kind} · ${chosen.profileId ? this.profileDisplay(chosen.profileId, undefined, chosen.effort) : task.spec.id}`, taskId); await this.executeOperation(op, signal);
     }
   }
   /** Only communication checkpoints bypass dependency readiness; they cannot edit. */
@@ -276,8 +280,8 @@ export class Engine extends EventEmitter {
     const box = this.mailbox; if (!box.enabled) return undefined;
     const outgoing = box.outgoing(task)[0], incoming = box.questions(task)[0], answers = box.readyAnswers(task);
     const list: Candidate[] = [];
-    const add = (kind: Candidate['kind'], reason: string, messages: PeerMessage[], profileId?: string, sessionId?: string) => {
-      const c = { kind, reason, messageIds: messages.map(m => m.id), taskId: task.id, profileId, sessionId, workspace: task.workspace, evidenceIds: task.evidence.map(e => e.id) };
+    const add = (kind: Candidate['kind'], reason: string, messages: PeerMessage[], profileId?: string, sessionId?: string, effort?: string) => {
+      const c = { kind, reason, messageIds: messages.map(m => m.id), taskId: task.id, profileId, effort, sessionId, workspace: task.workspace, evidenceIds: task.evidence.map(e => e.id) };
       list.push({ ...c, id: `C_${hash(c).slice(0, 14)}` });
     };
     if (outgoing) {
@@ -287,12 +291,15 @@ export class Engine extends EventEmitter {
     } else if (incoming) {
       box.assertFresh(incoming);
       const profiles = task.profileId && task.sessionId ? this.profiles('explainer').filter(p => p.id === task.profileId) : this.profiles('explainer');
-      for (const profile of profiles) add('ANSWER_PEER', 'Answer the queued question as this task\'s read-only peer. Use the existing assigned model/session when available; do not edit, accept work, or start another task.', [incoming], profile.id, profile.id === task.profileId ? task.sessionId : undefined);
+      for (const profile of profiles) {
+        const efforts = profile.id === task.profileId && task.sessionId ? [task.effort ?? this.profileEfforts(profile)[0] ?? 'default'] : this.profileEfforts(profile);
+        for (const effort of efforts) add('ANSWER_PEER', 'Answer the queued question as this task\'s read-only peer. Use the existing assigned model/session when available; do not edit, accept work, or start another task.', [incoming], profile.id, profile.id === task.profileId ? task.sessionId : undefined, effort);
+      }
     } else if (answers.length) {
       for (const m of answers) box.assertFresh(m);
       const outstanding = box.all().filter(m => m.kind === 'question' && m.fromTaskId === task.id && !['closed', 'rejected'].includes(m.status));
       if (outstanding.some(q => !answers.some(a => a.replyTo === q.id))) return undefined;
-      if (task.sessionId && this.profiles('implementer').some(p => p.id === task.profileId)) add('CONTINUE_AFTER_PEER', 'Append only these validated replies to the original implementation session, preserving its model and workspace. Continue work; the ordinary tests and independent review are still mandatory.', answers, task.profileId, task.sessionId);
+      if (task.sessionId && this.profiles('implementer').some(p => p.id === task.profileId)) add('CONTINUE_AFTER_PEER', 'Append only these validated replies to the original implementation session, preserving its model, effort and workspace. Continue work; the ordinary tests and independent review are still mandatory.', answers, task.profileId, task.sessionId, task.effort);
     } else return undefined;
     add('ASK_USER', 'Pause for clarification of the peer conversation or unavailable session/model. Never silently replace the original session.', []);
     add('PAUSE', 'Pause communication and preserve the files and message history.', []);
@@ -315,7 +322,7 @@ export class Engine extends EventEmitter {
       return;
     }
     if (c.kind === 'CONTINUE_AFTER_PEER') {
-      invariant(c.profileId === task.profileId && c.sessionId === task.sessionId && !!task.sessionId, 'A reply must return to the original model/session');
+      invariant(c.profileId === task.profileId && c.sessionId === task.sessionId && c.effort === task.effort && !!task.sessionId, 'A reply must return to the original model/session/effort');
       for (const m of messages) invariant(m.kind === 'answer' && m.toTaskId === task.id && m.status === 'queued', 'Reply is not pending for this task');
       this.store.tx(() => { for (const m of messages) box.update(m.id, { status: 'submitted', deliveryOperation: op.id }); });
       await this.worker(task, op, 'implementer', signal, update => this.store.tx(() => {
@@ -330,20 +337,24 @@ export class Engine extends EventEmitter {
     const run = this.run, profile = this.profiles('explainer').find(p => p.id === c.profileId);
     invariant(profile && run.workerStarts < run.config.runtime.maxWorkerStarts, 'Peer model unavailable or worker budget reached');
     const original = c.sessionId !== undefined;
-    if (original) invariant(task.profileId === profile.id && task.sessionId === c.sessionId && task.workspace, 'Peer session identity changed');
+    const effort = c.effort ?? (original ? task.effort : this.profileEfforts(profile)[0] ?? 'default');
+    const runtimeProfile = this.runtimeProfile(profile, effort);
+    if (original) invariant(task.profileId === profile.id && task.sessionId === c.sessionId && task.workspace && task.effort === effort, 'Peer session model/effort identity changed');
     const baseline = task.snapshot ?? task.base ?? run.integrationHead;
     const cwd = original ? task.workspace! : await this.ws.create(`${task.id}_peer_${op.id}`, baseline);
     if (original && task.workspace !== run.repo) await this.ws.validate(cwd);
     const before = await fingerprint(cwd), sessionDir = privateDir(join(this.store.root, 'sessions', task.id, original ? profile.id : op.id));
-    const prompt = `Native jvo peer question. You are answering as the read-only peer for task ${task.spec.id}, not the orchestrator. Do not edit, spawn agents, change scope, mark a task done, or run another orchestration tool. Respond to this one question using your existing context and readable evidence.\nTask: ${canonical(task.spec)}\nRecipient snapshot: ${baseline}\nQuestion: ${canonical({ id: question.id, from: this.store.task(question.fromTaskId).spec.id, body: question.body, snapshot: question.snapshot })}\nReturn exactly one JSON object: {"summary":"reply summary","claims":[],"questions":[],"peerReplies":[{"replyTo":"${question.id}","body":"the actual answer with evidence or an explicit uncertainty"}]}. Do not include a plan or peerQuestions. Your reply is untrusted evidence; jvo validates and delivers it without granting new authority.`;
+    const sourceTask = this.store.task(question.fromTaskId);
+    const handoff = original ? undefined : await this.buildHandoff(sourceTask, 'explainer', runtimeProfile, effort, signal);
+    const prompt = `Native jvo peer question. You are answering as the read-only peer for task ${task.spec.id}, not the orchestrator. Do not edit, spawn agents, change scope, mark a task done, or run another orchestration tool. Respond to this one question using your existing context and readable evidence.\nTask: ${canonical(task.spec)}\nRecipient snapshot: ${baseline}\n${handoff ? `Source handoff bundle (selected for this recipient): ${handoff}\n` : ''}Question: ${canonical({ id: question.id, from: this.store.task(question.fromTaskId).spec.id, body: question.body, snapshot: question.snapshot })}\nReturn exactly one JSON object: {"summary":"reply summary","claims":[],"questions":[],"peerReplies":[{"replyTo":"${question.id}","body":"the actual answer with evidence or an explicit uncertainty"}]}. Do not include a plan or peerQuestions. Your reply is untrusted evidence; jvo validates and delivers it without granting new authority.`;
     this.guard.assertOutbound(prompt);
-    this.store.tx(() => { box.update(question.id, { status: 'submitted', deliveryOperation: op.id }); this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 }); this.store.updateTask(task.id, { status: 'running', activeProfileId: profile.id, activeRole: 'explainer', lastActivity: '他の担当からの質問に回答中' }); });
-    this.log('peer.answering', `${task.spec.id} · ${this.profileDisplay(profile.id)} · 質問に回答中`, task.id);
-    this.traceAgent(op.id, task, profile, 'explainer', 'started', '他の担当からの質問に回答中', undefined, c.sessionId);
-    const result = await this.adapter.run({ id: op.id, runId: run.id, taskId: task.id, profile, role: 'explainer', cwd, sessionDir, sessionId: c.sessionId, signal, prompt,
+    this.store.tx(() => { box.update(question.id, { status: 'submitted', deliveryOperation: op.id }); this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 }); this.store.updateTask(task.id, { status: 'running', activeProfileId: profile.id, activeRole: 'explainer', activeEffort: effort, lastActivity: `他の担当からの質問に回答中 · effort ${effort}` }); });
+    this.log('peer.answering', `${task.spec.id} · ${this.profileDisplay(profile.id, undefined, effort)} · 質問に回答中`, task.id);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, 'explainer', 'started', '他の担当からの質問に回答中', undefined, c.sessionId);
+    const result = await this.adapter.run({ id: op.id, runId: run.id, taskId: task.id, profile: runtimeProfile, effort, role: 'explainer', cwd, sessionDir, sessionId: c.sessionId, signal, prompt,
       onSpawn: (pid, birth) => this.store.put('outbox', op.id, run.id, { ...this.store.get<Operation>('outbox', op.id), pid, birth }),
-      onEvent: e => { if (e.type === 'tool') this.log('peer.tool', this.guard.redact(terminalText(e.text ?? '')).slice(0, 500), task.id); if (['tool','model','session','error','done'].includes(e.type) || e.type === 'text' && e.key === 'final') this.traceAgent(op.id, task, profile, 'explainer', e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], e.text, e.model, e.sessionId); } });
-    this.store.put('attempts', op.id, run.id, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, role: 'explainer', cwd, resume: c.sessionId, snapshot: baseline, promptHash: hash(prompt), messageId: question.id }, result: JSON.parse(this.guard.redact(canonical(result))) });
+      onEvent: e => { if (e.type === 'tool') this.log('peer.tool', this.guard.redact(terminalText(e.text ?? '')).slice(0, 500), task.id); if (['tool','model','session','error','done'].includes(e.type) || e.type === 'text' && e.key === 'final') this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, 'explainer', e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], e.text, e.model, e.sessionId); } });
+    this.store.put('attempts', op.id, run.id, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, effort, role: 'explainer', cwd, resume: c.sessionId, snapshot: baseline, promptHash: hash(prompt), messageId: question.id }, result: JSON.parse(this.guard.redact(canonical(result))) });
     for (const [n, u] of result.usage.entries()) this.store.usage(`${op.id}:${n}`, run.id, u);
     if (!result.usage.length) this.store.usage(`${op.id}:unknown`, run.id, { basis: 'unavailable' });
     invariant(await fingerprint(cwd) === before, 'Peer answering modified a read-only workspace; reject the reply and inspect the changes');
@@ -356,7 +367,7 @@ export class Engine extends EventEmitter {
     const replies = parsePeerReplies(result.report.peerReplies ?? []);
     invariant(replies.length === 1 && replies[0]!.replyTo === question.id, 'Peer did not provide the requested correlated reply');
     this.store.tx(() => { box.reply(question, task, op.id, profile.id, replies[0]!); complete({ status: task.status }); });
-    this.traceAgent(op.id, task, profile, 'explainer', 'completed', replies[0]!.body, result.model, result.sessionId);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, 'explainer', 'completed', replies[0]!.body, result.model, result.sessionId);
     this.log('peer.answered', `${task.spec.id} → ${this.store.task(question.fromTaskId).spec.id} · 返答を保存、配送待ち`, task.id);
   }
   private state(task: Task, purpose: 'route' | 'verdict' = 'route'): Json {
@@ -415,7 +426,130 @@ export class Engine extends EventEmitter {
   private modelFacts(p: Profile): object {
     return { id: p.id, cli: p.adapter, provider: p.provider, model: p.model, name: p.modelName,
       description: p.modelDescription, contextWindow: p.contextWindow, reasoning: p.reasoning,
-      roles: p.roles, level: p.level };
+      efforts: this.profileEfforts(p), roles: p.roles, level: p.level };
+  }
+  private profileEfforts(p: Profile): string[] {
+    if (p.efforts?.length) return [...new Set(p.efforts)];
+    if (p.thinking) return [p.thinking];
+    if (!p.reasoning) return ['default'];
+    if (p.adapter === 'pi') return ['off','minimal','low','medium','high'];
+    if (p.adapter === 'codex') return ['low','medium','high'];
+    return ['default'];
+  }
+  private runtimeProfile(profile: Profile, effort?: string): Profile {
+    const allowed = this.profileEfforts(profile), selected = effort ?? allowed[0] ?? 'default';
+    invariant(allowed.includes(selected), 'Selected effort is outside the model-supported effort pool');
+    return { ...profile, thinking: selected === 'default' ? undefined : selected };
+  }
+  private reviewGatePass(task: Task, checks: Record<string, unknown>): boolean {
+    const prob = (key: string) => {
+      const a = checks[key] as any; return a?.kind === 'boolean' ? a.probability ?? 0 : 0;
+    };
+    const choiceSafe = (key: string) => {
+      const a = checks[key] as any;
+      return a?.kind === 'choice' && ['safe','not_applicable'].includes(a.selected)
+        && (a.confidence ?? a.probabilities?.[a.selected] ?? 0) >= this.run.config.thresholds.accept;
+    };
+    const correctness = checks.correctnessQuality as any;
+    const threshold = task.requiredReviews > 1 ? this.run.config.thresholds.highRiskAccept : this.run.config.thresholds.accept;
+    return prob('evidenceAdequate') >= this.run.config.thresholds.evidence
+      && prob('requirementsMet') >= threshold
+      && prob('diffRequirementFit') >= threshold
+      && prob('testsProtectBehavior') >= this.run.config.thresholds.evidence
+      && prob('scopePreserved') >= threshold
+      && correctness?.kind === 'score' && correctness.value >= 3
+      && choiceSafe('securityGate') && choiceSafe('compatibilityGate');
+  }
+  private reviewGateState(task: Task): Json {
+    const current = task.snapshot ?? task.base ?? this.run.integrationHead;
+    const latest = (kind: Evidence['kind'], limit: number) => task.evidence.filter(e => e.kind === kind && e.snapshot === current).slice(-limit).map(e => ({
+      producer: e.producer, trust: e.trust, content: clip(this.store.readArtifact(e.sourceHash), 30_000).text
+    }));
+    return json({
+      goal: this.run.goal, clarification: this.run.pendingMessage, task: task.spec, requirements: task.spec.acceptance,
+      snapshot: current, diff: latest('code-diff', 1), tests: latest('test', 3),
+      independentReviews: latest('review', Math.max(1, task.requiredReviews + 1)),
+      findings: task.findings, explicitNoTestsApproval: this.run.trust.allowNoTests,
+    });
+  }
+  private async buildHandoff(task: Task, role: Role, profile: Profile, effort: string | undefined, signal: AbortSignal): Promise<string> {
+    const snapshot = task.snapshot ?? task.base ?? this.run.integrationHead;
+    type Source = { id: string; kind: 'context' | Evidence['kind']; label: string; hash: string; content: string; pinned: boolean };
+    const sources: Source[] = [];
+    for (const h of task.contextIds) {
+      const content = this.store.readArtifact(h);
+      const first = content.split('\n', 1)[0]?.replace(/^SOURCE:\s*/, '') || h.slice(0, 12);
+      sources.push({ id: `context_${h.slice(0, 16)}`, kind: 'context', label: first, hash: h, content, pinned: false });
+    }
+    for (const e of task.evidence) {
+      if (role === 'reviewer' && e.kind === 'review') continue; // preserve review independence
+      const current = e.snapshot === snapshot;
+      const pinned = e.kind === 'user-request' || current && (e.kind === 'code-diff' || e.kind === 'test');
+      sources.push({ id: `evidence_${hash(e.id).slice(0, 16)}`, kind: e.kind, label: `${e.kind} · ${e.producer}`, hash: e.sourceHash,
+        content: this.store.readArtifact(e.sourceHash), pinned });
+    }
+    const optional = sources.filter(x => !x.pinned);
+    const choices = new Map<string, 'exact' | 'reference' | 'drop'>();
+    let decisionId: string | undefined;
+    if (optional.length <= 4) {
+      for (const item of optional) choices.set(item.id, 'exact');
+    } else {
+      const questions: Record<string, Question> = {};
+      for (const item of optional.slice(0, 48)) questions[`handoff_${hash(item.id).slice(0, 12)}`] = {
+        type: 'choice',
+        instructions: `For the recipient ${role} agent, decide how much of source ${item.label} is needed to continue task ${task.spec.id} without repeating already completed investigation. Preserve exact errors, constraints, contracts and evidence when they materially affect the recipient's work. Do not keep data merely because it was recently read.`,
+        criteria: {
+          exact: 'The recipient needs the actual content; losing details could change implementation or verification.',
+          reference: 'The recipient only needs to know this source was inspected or exists; the full content is not needed now and can be re-read.',
+          drop: 'This source is irrelevant, stale, duplicated, or not useful for the recipient task.'
+        }
+      };
+      const state = json({
+        purpose: 'recipient-specific handoff selection, not conversation compaction',
+        task: task.spec, snapshot, senderSummary: task.lastReport?.summary,
+        recipient: { role, model: this.modelFacts(profile), effort: effort ?? 'default' },
+        findings: task.findings.filter(f => !['fixed','not-applicable'].includes(f.status)),
+        sources: optional.slice(0, 48).map(item => ({ id: item.id, kind: item.kind, label: item.label,
+          excerpt: clip(item.content, 1600).text, chars: item.content.length }))
+      });
+      if (Object.keys(questions).length) {
+        const result = await this.evaluate(task, state, questions, signal);
+        invariant(result.fresh, 'Handoff selection became stale');
+        decisionId = result.decisionId;
+        for (const item of optional) {
+          const answer = result.evaluation.answers[`handoff_${hash(item.id).slice(0, 12)}`];
+          if (!answer || answer.kind !== 'choice') { choices.set(item.id, 'exact'); continue; }
+          const support = answer.confidence ?? answer.probabilities[answer.selected] ?? 0;
+          const selected = ['exact','reference','drop'].includes(answer.selected) ? answer.selected as 'exact' | 'reference' | 'drop' : 'exact';
+          // A low-confidence deletion becomes exact retention, never silent information loss.
+          choices.set(item.id, selected === 'drop' && support < this.run.config.thresholds.evidence ? 'exact' : selected);
+        }
+      }
+    }
+    const items: HandoffBundle['items'] = [];
+    let remaining = Math.max(8_000, Math.floor(this.run.trust.maxEvidenceBytes * 0.6));
+    for (const item of sources) {
+      const mode = item.pinned ? 'exact' : choices.get(item.id) ?? (optional.length > 48 ? 'reference' : 'exact');
+      if (mode === 'drop') continue;
+      if (mode === 'reference') { items.push({ id: item.id, kind: item.kind, label: item.label, sourceHash: item.hash, mode }); continue; }
+      const maxChars = Math.max(0, Math.min(item.content.length, Math.floor(remaining / 2)));
+      const content = maxChars > 0 ? clip(item.content, maxChars).text : undefined;
+      if (!content) { items.push({ id: item.id, kind: item.kind, label: item.label, sourceHash: item.hash, mode: 'reference' }); continue; }
+      remaining -= Buffer.byteLength(content);
+      items.push({ id: item.id, kind: item.kind, label: item.label, sourceHash: item.hash, mode: 'exact', content });
+    }
+    const bundle: HandoffBundle = {
+      from: task.profileId ? this.profileDisplay(task.profileId, task.observedModel, task.effort) : 'jvo/orchestrator',
+      to: { role, profileId: profile.id, cli: profile.adapter, model: profile.model, provider: profile.provider, effort },
+      task: task.spec, snapshot, summary: task.lastReport?.summary, openQuestions: task.lastReport?.questions ?? [],
+      items, selection: optional.length <= 4 ? 'all-small' : 'jev', decisionId
+    };
+    const artifact = this.store.artifact(this.runId, canonical(bundle));
+    this.store.event(this.runId, 'handoff.created', { taskId: task.id, role, profileId: profile.id, effort, artifact,
+      exact: items.filter(i => i.mode === 'exact').length, references: items.filter(i => i.mode === 'reference').length,
+      dropped: sources.length - items.length, decisionId });
+    this.log('handoff', `${task.spec.id} → ${this.profileDisplay(profile.id, undefined, effort)} · exact ${items.filter(i => i.mode === 'exact').length} / ref ${items.filter(i => i.mode === 'reference').length}`, task.id);
+    return canonical(bundle);
   }
   private authorityHash(task: Task): string {
     const run = this.run;
@@ -443,14 +577,15 @@ export class Engine extends EventEmitter {
       && task.sameFailure < this.run.config.runtime.maxSameFailure
       && this.run.workerStarts < this.run.config.runtime.maxWorkerStarts
       && !task.lastReport?.questions.length && !this.mailbox.waiting(task)
-      && this.profiles('implementer').some(p => p.id === task.profileId);
+      && this.profiles('implementer').some(p => p.id === task.profileId && this.profileEfforts(p).includes(task.effort ?? 'default'));
   }
   private canRepeatReview(task: Task): boolean {
     const grant = task.reviewGrant, profile = this.profiles('reviewer').find(p => p.id === grant?.profileId);
     return !!grant && !!profile && task.phase === 'review' && task.testsPassed === true
       && task.testedSnapshot === task.snapshot && task.reviewCount < task.requiredReviews
       && this.run.workerStarts < this.run.config.runtime.maxWorkerStarts
-      && grant.policyHash === this.authorityHash(task) && grant.profileHash === hash(profile);
+      && grant.policyHash === this.authorityHash(task) && grant.profileHash === hash(profile)
+      && this.profileEfforts(profile).includes(grant.effort ?? 'default');
   }
   private async runMechanicalPeer(task: Task, candidates: Candidate[], signal: AbortSignal): Promise<boolean> {
     const c = candidates.find(c => c.kind === 'DELIVER_MESSAGE' || c.kind === 'CONTINUE_AFTER_PEER'
@@ -504,10 +639,10 @@ export class Engine extends EventEmitter {
     } else if (policy.rule === 'task.repair') {
       invariant(c.kind === 'REWORK_SAME_SESSION' && this.canRepair(task)
         && task.implementationGrant?.decisionId === op.decisionId && c.profileId === task.profileId
-        && c.sessionId === task.sessionId, 'Repair exceeds its existing grant');
+        && c.sessionId === task.sessionId && c.effort === task.effort, 'Repair exceeds its existing grant');
     } else if (policy.rule === 'task.review') {
       invariant(c.kind === 'REQUEST_REVIEW' && this.canRepeatReview(task)
-        && task.reviewGrant?.decisionId === op.decisionId && c.profileId === task.reviewGrant.profileId,
+        && task.reviewGrant?.decisionId === op.decisionId && c.profileId === task.reviewGrant.profileId && c.effort === task.reviewGrant.effort,
         'Repeated review exceeds its existing grant');
     } else if (policy.rule.startsWith('peer.')) {
       const expected = { 'peer.deliver': 'DELIVER_MESSAGE', 'peer.answer': 'ANSWER_PEER', 'peer.continue': 'CONTINUE_AFTER_PEER' }[policy.rule];
@@ -521,7 +656,7 @@ export class Engine extends EventEmitter {
       }
       if (policy.rule !== 'peer.deliver') invariant(task.implementationGrant?.decisionId === op.decisionId
         && task.implementationGrant.policyHash === this.authorityHash(task)
-        && c.profileId === task.profileId && c.sessionId === task.sessionId, 'Peer changed the assigned model/session');
+        && c.profileId === task.profileId && c.sessionId === task.sessionId && c.effort === task.effort, 'Peer changed the assigned model/session/effort');
     } else throw new Error('Unknown runtime policy rule');
   }
   private profiles(role: Role): Profile[] { return this.run.config.profiles.filter(p => p.enabled && p.roles.includes(role) && ['managed', 'trusted-local'].includes(p.level)); }
@@ -534,12 +669,14 @@ export class Engine extends EventEmitter {
     }
     for (const f of task.findings) if (f.duplicateOf && resolutions[f.duplicateOf]) resolutions[f.id] = resolutions[f.duplicateOf]!;
     const criticalResolved = task.findings.every(f => f.severity !== 'blocker' || f.status === 'fixed' || f.status === 'not-applicable' || !!resolutions[f.id]);
-    const add = (kind: Candidate['kind'], reason: string, profileId?: string, specialization?: string) => {
-      const c = { kind, reason, taskId: task.id, profileId, specialization, workspace: task.workspace,
+    const add = (kind: Candidate['kind'], reason: string, profileId?: string, specialization?: string, effort?: string) => {
+      const c = { kind, reason, taskId: task.id, profileId, effort, specialization, workspace: task.workspace,
         sessionId: kind === 'REWORK_SAME_SESSION' ? task.sessionId : undefined, evidenceIds: task.evidence.map(e => e.id) };
       list.push({ ...c, ...(kind === 'ACCEPT_TASK' ? { findingResolutions: resolutions } : {}), id: `C_${hash({ ...c, resolutions: kind === 'ACCEPT_TASK' ? resolutions : undefined }).slice(0, 14)}` });
     };
-    const propose = (kind: Candidate['kind'], role: Role, reason: string) => { for (const p of this.profiles(role)) add(kind, reason, p.id); };
+    const propose = (kind: Candidate['kind'], role: Role, reason: string) => {
+      for (const p of this.profiles(role)) for (const effort of this.profileEfforts(p)) add(kind, reason, p.id, undefined, effort);
+    };
     if (task.phase === 'assess') {
       propose('START_TASK', 'implementer', 'Implement this task directly; use the task worktree and submit proof.');
       if (task.diagnoses < 2) {
@@ -550,13 +687,11 @@ export class Engine extends EventEmitter {
       if (task.proposedPlan?.length) add('ACCEPT_PLAN', 'Adopt the proposed bounded, acyclic task graph only if it fully preserves the requested scope.');
       if (task.diagnoses < 3) propose('REQUEST_PLAN', 'planner', 'Revise the proposal without expanding scope.');
     } else if (task.phase === 'implement' || task.phase === 'judge') {
-      const adequate = (checks.evidenceAdequate as { probability?: number } | undefined)?.probability ?? 0;
-      const met = (checks.requirementsMet as { probability?: number } | undefined)?.probability ?? 0;
-      if (task.phase === 'judge' && this.acceptable(task) && criticalResolved && adequate >= this.run.config.thresholds.evidence && met >= (task.requiredReviews > 1 ? this.run.config.thresholds.highRiskAccept : this.run.config.thresholds.accept)) add('ACCEPT_TASK', 'The current snapshot has runtime verification and independent reviews; close findings only if all requirements are actually met.');
+      if (task.phase === 'judge' && this.acceptable(task) && criticalResolved && this.reviewGatePass(task, checks)) add('ACCEPT_TASK', 'The current snapshot passed the diff-and-requirements Jev Review Gate with current runtime verification and independent review.');
       if (task.attempts < this.run.config.runtime.maxRepairs && task.sameFailure < this.run.config.runtime.maxSameFailure) {
-        if (task.sessionId && task.profileId) add('REWORK_SAME_SESSION', 'Repair the unresolved findings in the same implementation session and workspace.', task.profileId);
+        if (task.sessionId && task.profileId) add('REWORK_SAME_SESSION', 'Repair the unresolved findings in the same implementation session, model, effort and workspace.', task.profileId, undefined, task.effort);
         else propose('START_TASK', 'implementer', 'Continue the retained task workspace with a new explicitly selected session.');
-        for (const p of this.profiles('implementer').filter(p => p.id !== task.profileId)) add('REASSIGN_TASK', 'Choose only for a demonstrated capability or availability mismatch; preserve the task workspace.', p.id);
+        for (const p of this.profiles('implementer').filter(p => p.id !== task.profileId)) for (const effort of this.profileEfforts(p)) add('REASSIGN_TASK', 'Choose only for a demonstrated capability or availability mismatch; preserve the task workspace.', p.id, undefined, effort);
       }
       if (task.diagnoses < 3) propose('REQUEST_EVIDENCE', 'scout', 'Resolve missing proof or diagnose repeated failure without editing or treating capacity problems as task difficulty.');
       if (task.snapshot && task.reviewCount < task.requiredReviews + 2) propose('REQUEST_REVIEW', 'reviewer', 'Re-examine disputed findings or missing evidence in an independent session.');
@@ -600,7 +735,7 @@ export class Engine extends EventEmitter {
     }
     op = { ...op, state: 'running', startedAt: now() }; this.store.put('outbox', op.id, this.runId, op);
     const complete = (update: Partial<Task> = {}) => this.store.tx(() => {
-      this.store.updateTask(task.id, { ...update, activeOperation: undefined, activeProfileId: undefined, activeRole: undefined });
+      this.store.updateTask(task.id, { ...update, activeOperation: undefined, activeProfileId: undefined, activeRole: undefined, activeEffort: undefined });
       this.store.put('outbox', op.id, this.runId, { ...this.store.get<Operation>('outbox', op.id), state: 'done', receipt: hash(update) });
       this.store.event(this.runId, 'operation.completed', { taskId: task.id, action: c.kind, operation: op.id });
     });
@@ -672,6 +807,8 @@ export class Engine extends EventEmitter {
       for (const spec of specs) {
         const localId = mapping.get(spec.id)!;
         const next = makeTask(this.run, { ...spec, id: localId, instruction: `Original requirement: ${this.run.goal}\n\n${spec.instruction}`, dependsOn: spec.dependsOn.length ? spec.dependsOn.map(dep => `${this.runId}_${mapping.get(dep)!}`) : task.spec.dependsOn });
+        // Preserve the planner/scout evidence as handoff candidates. The recipient-specific packer will decide exact/reference/drop later.
+        next.contextIds = [...task.contextIds]; next.evidence = task.evidence.map(e => ({ ...e }));
         invariant(!this.store.get('tasks', next.id), 'Plan task already exists');
         this.store.put('tasks', next.id, this.runId, next);
       }
@@ -704,6 +841,8 @@ export class Engine extends EventEmitter {
     const run = this.run, c = op.candidate;
     const profile = run.config.profiles.find(p => p.id === c.profileId);
     invariant(profile?.enabled && profile.roles.includes(role), 'Selected profile does not allow this role');
+    const effort = c.effort ?? (initial.effort && initial.profileId === profile.id ? initial.effort : this.profileEfforts(profile)[0] ?? 'default');
+    const runtimeProfile = this.runtimeProfile(profile, effort);
     invariant(run.workerStarts < run.config.runtime.maxWorkerStarts, 'Worker start budget reached');
     let task = initial;
     const writer = role === 'implementer';
@@ -714,25 +853,25 @@ export class Engine extends EventEmitter {
     else cwd = await this.ws.create(`${task.id}_${role}_${op.id}`, baseline);
     const beforeRead = !writer ? await fingerprint(cwd) : undefined;
     const resume = writer && ['REWORK_SAME_SESSION', 'CONTINUE_AFTER_PEER'].includes(c.kind) ? task.sessionId : undefined;
-    const affinity = hash({ profile, role, cwd, instructionVersion: run.instructionVersion });
-    if (resume) invariant(task.sessionFingerprint === affinity && task.profileId === profile.id, 'Session affinity changed; select an explicit reassignment instead of corrupting cached context');
+    const affinity = hash({ profile: runtimeProfile, role, cwd, instructionVersion: run.instructionVersion });
+    if (resume) invariant(task.sessionFingerprint === affinity && task.profileId === profile.id && task.effort === effort, 'Session model/effort affinity changed; select an explicit reassignment instead of corrupting cached context');
     const sessionDir = privateDir(join(this.store.root, 'sessions', task.id, writer ? profile.id : op.id));
-    const context = task.contextIds.map(h => this.store.readArtifact(h)).join('\n\n');
     const pack = evidencePack(task.evidence, run.trust.maxEvidenceBytes, this.guard);
+    const handoff = resume ? undefined : await this.buildHandoff(task, role, runtimeProfile, effort, signal);
     let prompt = resume ? `Continue task ${task.spec.id} in this same session and workspace.\nDo not repeat completed work.\nCurrent snapshot: ${baseline}\nUnresolved findings: ${canonical(task.findings.filter(f => f.status !== 'fixed'))}\nLatest runtime proof: ${canonical(pack.items.slice(-4))}\nLatest failure: ${task.lastFailure ?? 'none'}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}${REPORT_CONTRACT}`
-      : `You are the ${role} worker, not the orchestrator. Do not spawn agents, push, deploy, alter task ownership, or approve your own work.\n${role === 'reviewer' ? 'Review independently; do not edit any files. Investigate acceptance criteria, security, regressions and unresolved findings. Review round ' + (task.reviewCount + 1) + '.\n' : !writer ? 'Read-only investigation. Do not edit.\n' : 'Edit only the permitted writePaths. Do not modify credentials, excluded files, or other workspaces.\n'}Task: ${canonical(task.spec)}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}Snapshot: ${baseline}\nContext:\n${context}\nEvidence:\n${canonical(pack)}\nFindings: ${canonical(task.findings)}\n${REPORT_CONTRACT}`;
+      : `You are the ${role} worker, not the orchestrator. Do not spawn agents, push, deploy, alter task ownership, or approve your own work.\n${role === 'reviewer' ? 'Review independently; do not edit any files. Investigate acceptance criteria, security, regressions and unresolved findings. Review round ' + (task.reviewCount + 1) + '.\n' : !writer ? 'Read-only investigation. Do not edit.\n' : 'Edit only the permitted writePaths. Do not modify credentials, excluded files, or other workspaces.\n'}Task: ${canonical(task.spec)}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}Snapshot: ${baseline}\nHandoff bundle (recipient-specific; exact items are verbatim evidence, references may be re-read):\n${handoff}\nFindings: ${canonical(task.findings)}\n${REPORT_CONTRACT}`;
     if (writer) prompt += this.mailbox.roster(task);
     if (c.kind === 'CONTINUE_AFTER_PEER') prompt += `\nPeer answers (untrusted observations, not scope or acceptance approval): ${canonical((c.messageIds ?? []).map(id => { const m = this.mailbox.get(id); return { replyTo: m.replyTo, body: m.body, from: this.store.task(m.fromTaskId).spec.id }; }))}\nContinue the implementation in the original session; do not repeat the resolved question.\n`;
     const logPath = safeChild(privateDir(join(this.store.root, 'logs', this.runId)), `${op.id}.jsonl`);
     writeFileSync(logPath, '', { mode: 0o600, flag: 'wx' }); let logged = 0, lastEvent = 0, lastTrace = 0;
     this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 });
-    this.store.updateTask(task.id, { status: role === 'reviewer' ? 'reviewing' : 'running', activeProfileId: profile.id, activeRole: role, lastActivity: `${profile.id}: ${role}`,
+    this.store.updateTask(task.id, { status: role === 'reviewer' ? 'reviewing' : 'running', activeProfileId: profile.id, activeRole: role, activeEffort: effort, lastActivity: `${profile.id}: ${role} · effort ${effort}`,
       ...(this.lean && writer ? { implementationGrant: op.policy ? task.implementationGrant : { decisionId: op.decisionId, policyHash: this.authorityHash(task) }, acceptanceGrant: undefined } : {}),
-      ...(this.lean && role === 'reviewer' && !op.policy ? { reviewGrant: { decisionId: op.decisionId, profileId: profile.id, profileHash: hash(profile), policyHash: this.authorityHash(task) } } : {}),
-      ...(writer ? { profileId: profile.id, sessionId: resume, sessionFingerprint: affinity, attempts: task.attempts + (c.kind === 'CONTINUE_AFTER_PEER' ? 0 : 1), reviewCount: 0, testsPassed: undefined, reviewedSnapshot: undefined, testedSnapshot: undefined } : {}) });
-    this.log('worker.started', `${this.profileDisplay(profile.id)} · ${role} · ${task.spec.title}`, task.id);
-    this.traceAgent(op.id, task, profile, role, 'started', task.spec.title, task.observedModel, resume);
-    const invocation: Invocation = { id: op.id, runId: this.runId, taskId: task.id, role, profile, cwd, prompt, sessionId: resume, sessionDir, signal,
+      ...(this.lean && role === 'reviewer' && !op.policy ? { reviewGrant: { decisionId: op.decisionId, profileId: profile.id, effort, profileHash: hash(profile), policyHash: this.authorityHash(task) } } : {}),
+      ...(writer ? { profileId: profile.id, effort, sessionId: resume, sessionFingerprint: affinity, attempts: task.attempts + (c.kind === 'CONTINUE_AFTER_PEER' ? 0 : 1), reviewCount: 0, testsPassed: undefined, reviewedSnapshot: undefined, testedSnapshot: undefined } : {}) });
+    this.log('worker.started', `${this.profileDisplay(profile.id, undefined, effort)} · ${role} · ${task.spec.title}`, task.id);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, 'started', task.spec.title, task.observedModel, resume);
+    const invocation: Invocation = { id: op.id, runId: this.runId, taskId: task.id, role, profile: runtimeProfile, effort, cwd, prompt, sessionId: resume, sessionDir, signal,
       onSpawn: (pid, birth) => this.store.put('outbox', op.id, this.runId, { ...this.store.get<Operation>('outbox', op.id), pid, birth }),
       onEvent: e => {
         const clean = { ...e, text: e.text === undefined ? undefined : this.guard.redact(terminalText(e.text)).slice(0, 20_000) };
@@ -740,14 +879,14 @@ export class Engine extends EventEmitter {
         if (logged + Buffer.byteLength(line) <= run.config.runtime.maxLogBytes) { appendFileSync(logPath, line); logged += Buffer.byteLength(line); }
         if (e.type === 'session' && writer && e.sessionId) {
           const current = this.store.task(task.id); this.store.put('tasks', task.id, this.runId, { ...current, sessionId: e.sessionId });
-          this.store.put('sessions', hash({ taskId: task.id, profile: profile.id }), this.runId, { taskId: task.id, sessionId: e.sessionId, affinity, cwd, profile });
+          this.store.put('sessions', hash({ taskId: task.id, profile: profile.id }), this.runId, { taskId: task.id, sessionId: e.sessionId, affinity, cwd, profile: runtimeProfile, effort });
         }
         if (e.type === 'model' && writer && e.model) {
           const current = this.store.task(task.id); this.store.put('tasks', task.id, this.runId, { ...current, observedModel: e.model });
         }
         const important = ['tool', 'model', 'session', 'error', 'done'].includes(e.type) || e.type === 'text' && e.key === 'final';
         if (important || e.type === 'text' && Date.now() - lastTrace > 350) {
-          this.traceAgent(op.id, this.store.task(task.id), profile, role, e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], clean.text, e.model, e.sessionId);
+          this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], clean.text, e.model, e.sessionId);
           lastTrace = Date.now();
         }
         // Transport progress must not invalidate a semantic decision or generate API calls.
@@ -757,7 +896,7 @@ export class Engine extends EventEmitter {
         }
       } };
     const result = await this.adapter.run(invocation);
-    this.store.put('attempts', op.id, this.runId, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, role, cwd, resume, promptHash: hash(prompt), snapshot: baseline }, result: JSON.parse(this.guard.redact(canonical(result))) });
+    this.store.put('attempts', op.id, this.runId, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, effort, role, cwd, resume, promptHash: hash(prompt), snapshot: baseline }, result: JSON.parse(this.guard.redact(canonical(result))) });
     for (const [i, u] of result.usage.entries()) this.store.usage(`${op.id}:${i}`, this.runId, u);
     if (!result.usage.length) this.store.usage(`${op.id}:unknown`, this.runId, { basis: 'unavailable' });
     if (!writer) invariant(await fingerprint(cwd) === beforeRead, 'Read-only worker changed its review snapshot; its report is not admissible');
@@ -775,7 +914,7 @@ export class Engine extends EventEmitter {
       complete({ phase: writer ? 'implement' : role === 'reviewer' ? 'review' : role === 'planner' && task.proposedPlan?.length ? 'plan-review' : 'assess', status: 'reported', lastFailure: failure, sameFailure: same,
         ...(writer ? { sessionId: result.sessionId ?? this.store.task(task.id).sessionId } : {}) });
       this.addEvidence(task.id, 'observation', baseline, failure, 'runtime', 'runtime-observed');
-      this.traceAgent(op.id, this.store.task(task.id), profile, role, 'error', failure, result.model, result.sessionId);
+      this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, 'error', failure, result.model, result.sessionId);
       this.log('worker.failed', failure, task.id);
       if (result.status === 'interrupted' && this.run.status === 'running') this.store.updateRun(this.runId, { status: 'paused', blockReason: failure });
       return;
@@ -813,8 +952,8 @@ export class Engine extends EventEmitter {
       complete({ lastReport: report, diagnoses: task.diagnoses + 1, phase: task.snapshot ? 'judge' : task.workspace ? 'implement' : 'assess', status: 'reported',
         sameFailure: task.sameFailure >= run.config.runtime.maxSameFailure ? 0 : task.sameFailure });
     }
-    this.traceAgent(op.id, this.store.task(task.id), profile, role, 'completed', report.summary, result.model, result.sessionId);
-    this.log('worker.completed', `${this.profileDisplay(profile.id, result.model)} · ${role} · ${report.summary}`, task.id);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, 'completed', report.summary, result.model, result.sessionId);
+    this.log('worker.completed', `${this.profileDisplay(profile.id, result.model, effort)} · ${role} · ${report.summary}`, task.id);
   }
   private addEvidence(taskId: string, kind: Evidence['kind'], snapshot: string, content: string, producer: string, trust: Evidence['trust']): void {
     const clean = this.guard.redact(terminalText(content));
@@ -895,7 +1034,7 @@ export class Engine extends EventEmitter {
     const conflictId = `merge-${task.spec.id}`;
     const conflict = makeTask(this.run, { id: conflictId, title: `Resolve integration conflicts for ${task.spec.title}`, instruction: `Resolve the merge conflicts without losing either accepted task's requirements. Conflicted paths: ${result.conflicts.join(', ')}. Original request: ${this.run.goal}`, acceptance: task.spec.acceptance, dependsOn: [], readPaths: ['**'], writePaths: ['**'], resources: ['integration'] }, 'conflict');
     conflict.workspace = this.run.integration; conflict.base = this.run.base;
-    conflict.evidence = task.evidence; this.store.put('tasks', conflict.id, this.runId, conflict);
+    conflict.contextIds = [...task.contextIds]; conflict.evidence = task.evidence.map(e => ({ ...e })); this.store.put('tasks', conflict.id, this.runId, conflict);
     this.log('conflict', '統合競合を独立した修正タスクとして作成しました。再検証・再レビューを行います。', conflict.id);
   }
   private async prepareFinal(): Promise<void> {
@@ -960,7 +1099,7 @@ export class Engine extends EventEmitter {
         const before = run.config.profiles.find(p => p.id === task.profileId), after = next.profiles.find(p => p.id === task.profileId);
         const changed = contextChanged || !after?.enabled || hash(before ?? null) !== hash(after);
         this.store.updateTask(task.id, { implementationGrant: undefined, reviewGrant: undefined, acceptanceGrant: undefined, finalVerificationPending: false, verificationFailure: undefined, assessments: undefined, contextIds: contextChanged ? [] : task.contextIds,
-          ...(changed ? { profileId: undefined, sessionId: undefined, sessionFingerprint: undefined, observedModel: undefined } : {}),
+          ...(changed ? { profileId: undefined, effort: undefined, activeEffort: undefined, sessionId: undefined, sessionFingerprint: undefined, observedModel: undefined } : {}),
           ...(task.phase === 'done' && !task.snapshot ? {} : { phase: task.snapshot ? 'verify' : 'assess', status: 'reported', testsPassed: undefined, testedSnapshot: undefined, reviewedSnapshot: undefined, reviewCount: 0, staged: false }) });
       }
       this.store.put('approvals', id('policy'), run.id, { oldPolicyHash: hash(run.config), newPolicyHash: hash(next), trust, by: 'user', time: now() });

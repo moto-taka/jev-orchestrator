@@ -21,8 +21,12 @@ class PeerProvider extends DemoProvider {
    let chosen=cs.find(c=>c.kind===action);
    if(!chosen) { const a=r.answers.action; if(a?.kind==='choice') chosen=cs.find(c=>c.id===a.selected); }
    if(chosen?.profileId) {
-    const key='model_'+chosen.kind, q=questions[key];
-    if(q?.type==='choice') { const selected=s.task.id.endsWith('-B')?'claude-pool':'codex-pool'; r.answers[key]={kind:'choice',selected,confidence:1,probabilities:Object.fromEntries(Object.keys(q.criteria).map(id=>[id,id===selected?1:0]))}; }
+    const key='assignment_'+chosen.kind, q=questions[key];
+    if(q?.type==='choice') {
+      const profile=s.task.id.endsWith('-B')?'claude-pool':'codex-pool';
+      const selected=cs.find(c=>c.kind===chosen!.kind&&c.profileId===profile)?.id ?? Object.keys(q.criteria)[0]!;
+      r.answers[key]={kind:'choice',selected,confidence:1,probabilities:Object.fromEntries(Object.keys(q.criteria).map(id=>[id,id===selected?1:0]))};
+    }
    }
    if(chosen) r.answers.action={kind:'choice',selected:chosen.id,probabilities:Object.fromEntries(cs.map(c=>[c.id,c.id===chosen!.id?1:0])),confidence:1};
   }

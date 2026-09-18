@@ -33,7 +33,7 @@ const labels: Record<string, string> = { running: '実行中', paused: '一時�
 const number = (v?: number) => v === undefined ? '不明' : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
 export interface AgentCard {
   invocationId: string; taskId: string; taskSpecId: string; profileId: string;
-  label: string; prefix: string; alias: string; model: string; role: string; status: 'running' | 'done' | 'error';
+  label: string; prefix: string; alias: string; model: string; effort: string; role: string; status: 'running' | 'done' | 'error';
   lastText?: string; lastType?: AgentTrace['type']; time: string; observedModel?: string; configuredModel?: string; sessionId?: string;
   events: AgentTrace[];
 }
@@ -61,12 +61,13 @@ export function agentCards(view: View | undefined): AgentCard[] {
     const observed = [...events].reverse().find(e => e.observedModel)?.observedModel;
     const configured = [...events].reverse().find(e => e.configuredModel)?.configuredModel;
     const sessionId = [...events].reverse().find(e => e.sessionId)?.sessionId;
+    const effort = [...events].reverse().find(e => e.effort)?.effort ?? 'default';
     const status: AgentCard['status'] = last.type === 'error' ? 'error' : last.type === 'completed' ? 'done' : 'running';
     const lastVisible = [...events].reverse().find(e => e.text && !['session','model'].includes(e.type));
     const profile = view?.agents.find(x => x.id === first.profileId);
     cards.push({ invocationId, taskId: first.taskId, taskSpecId: first.taskSpecId, profileId: first.profileId,
       label: profileLabel(view, first.profileId, observed, configured), prefix: profile?.adapter ?? first.adapter,
-      alias: profile?.modelName ?? configured ?? observed ?? 'default', model: modelLabel(profile, observed, configured), role: first.role, status,
+      alias: profile?.modelName ?? configured ?? observed ?? 'default', model: modelLabel(profile, observed, configured), effort, role: first.role, status,
       lastText: lastVisible?.text, lastType: lastVisible?.type, time: last.time, observedModel: observed, configuredModel: configured, sessionId, events });
   }
   if (!cards.length && view?.tasks.length) {
@@ -74,7 +75,7 @@ export function agentCards(view: View | undefined): AgentCard[] {
       const p = view.agents.find(x => x.id === t.activeProfileId);
       cards.push({ invocationId: 'task:' + t.id, taskId: t.id, taskSpecId: t.spec.id, profileId: t.activeProfileId!,
         label: profileLabel(view, t.activeProfileId!, t.observedModel), prefix: p?.adapter ?? 'agent',
-        alias: p?.modelName ?? p?.model ?? t.observedModel ?? 'default', model: modelLabel(p, t.observedModel), role: t.activeRole ?? t.phase, status: 'running',
+        alias: p?.modelName ?? p?.model ?? t.observedModel ?? 'default', model: modelLabel(p, t.observedModel), effort: t.activeEffort ?? t.effort ?? 'default', role: t.activeRole ?? t.phase, status: 'running',
         lastText: t.lastActivity, time: '', observedModel: t.observedModel, configuredModel: p?.model, sessionId: t.sessionId, events: [] });
     }
   }
@@ -108,7 +109,7 @@ function inputLayout(input: string, cursor: number, width: number, maxRows: numb
 export function renderScreen(view: View | undefined, state: ScreenState, columns: number, rows: number): { lines: string[]; cursor: { row: number; column: number } } {
   const width = Math.max(20, columns - 2), height = Math.max(8, rows), run = view?.run;
   const lines: string[] = [];
-  lines.push(`  ▐▛██▜▌  jvo  0.3.2${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
+  lines.push(`  ▐▛██▜▌  jvo  0.4.0${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
   lines.push(`  ▝▜██▛▘  ${run ? basename(run.repo) : 'Jev Orchestrator'}  ·  ${run ? state.demo ? 'DEMO fixture / 本番API未使用' : `${run.config.decision.provider} / ${run.config.decision.model}` : '判断はJev、作業はお使いのCLIへ。'}`);
   lines.push(`    ▘▘    ${run ? `${labels[run.status] ?? run.status}  ·  ${run.id.slice(0, 16)}` : 'タスクを入力してください。 /help で操作を確認できます。'}`);
   lines.push('');
@@ -118,7 +119,7 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
     const icon = selectedAgent.status === 'running' ? '●' : selectedAgent.status === 'error' ? '!' : '✓';
     content.push(`  ← Agent  ${icon} ${selectedAgent.label} · ${selectedAgent.role} · ${selectedAgent.taskSpecId}`,
       `     profile: ${selectedAgent.profileId}`,
-      `     model: ${selectedAgent.observedModel ? 'observed ' + selectedAgent.observedModel : 'configured ' + (selectedAgent.configuredModel ?? 'default') + ' / actual未観測'}`,
+      `     model: ${selectedAgent.observedModel ? 'observed ' + selectedAgent.observedModel : 'configured ' + (selectedAgent.configuredModel ?? 'default') + ' / actual未観測'} · effort: ${selectedAgent.effort}`,
       `     session: ${selectedAgent.sessionId ?? '未観測'}`,
       '', '  実行ストリーム  [Esc: 親へ / ↑↓: agent切替 / PgUp・PgDn: スクロール]', '');
     for (const e of selectedAgent.events) {
@@ -231,7 +232,7 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
     const icon = selected.status === 'running' ? '●' : selected.status === 'error' ? '!' : '✓';
     const selection = state.agentSelected || state.agentFocus ? '›' : ' ';
     lines.push(fit(`  ${selection} ↓ agents ${selectedIndex + 1}/${cards.length}  ${icon} ${selected.label} · ${selected.role} · ${selected.taskSpecId} · Enterで実行を見る`, width));
-    lines.push(fit(`    prefix ${selected.prefix} · alias ${selected.alias} · model ${selected.model} · ↑↓ 選択 · Esc 戻る`, width));
+    lines.push(fit(`    prefix ${selected.prefix} · alias ${selected.alias} · model ${selected.model} · effort ${selected.effort} · ↑↓ 選択 · Esc 戻る`, width));
   } else {
     const commandHint = state.input.startsWith('/') ? COMMANDS.filter(c => c.startsWith(state.input.split(' ')[0]!)).join('  ') : '/agents  /tasks  /messages  /diff  /why  /usage';
     lines.push(fit(`  ${commandHint}`, width));
