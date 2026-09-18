@@ -276,8 +276,8 @@ export class Engine extends EventEmitter {
     const box = this.mailbox; if (!box.enabled) return undefined;
     const outgoing = box.outgoing(task)[0], incoming = box.questions(task)[0], answers = box.readyAnswers(task);
     const list: Candidate[] = [];
-    const add = (kind: Candidate['kind'], reason: string, messages: PeerMessage[], profileId?: string, sessionId?: string) => {
-      const c = { kind, reason, messageIds: messages.map(m => m.id), taskId: task.id, profileId, sessionId, workspace: task.workspace, evidenceIds: task.evidence.map(e => e.id) };
+    const add = (kind: Candidate['kind'], reason: string, messages: PeerMessage[], profileId?: string, sessionId?: string, effort?: string) => {
+      const c = { kind, reason, messageIds: messages.map(m => m.id), taskId: task.id, profileId, effort, sessionId, workspace: task.workspace, evidenceIds: task.evidence.map(e => e.id) };
       list.push({ ...c, id: `C_${hash(c).slice(0, 14)}` });
     };
     if (outgoing) {
@@ -287,12 +287,15 @@ export class Engine extends EventEmitter {
     } else if (incoming) {
       box.assertFresh(incoming);
       const profiles = task.profileId && task.sessionId ? this.profiles('explainer').filter(p => p.id === task.profileId) : this.profiles('explainer');
-      for (const profile of profiles) add('ANSWER_PEER', 'Answer the queued question as this task\'s read-only peer. Use the existing assigned model/session when available; do not edit, accept work, or start another task.', [incoming], profile.id, profile.id === task.profileId ? task.sessionId : undefined);
+      for (const profile of profiles) {
+        const efforts = profile.id === task.profileId && task.sessionId ? [task.effort ?? this.profileEfforts(profile)[0] ?? 'default'] : this.profileEfforts(profile);
+        for (const effort of efforts) add('ANSWER_PEER', 'Answer the queued question as this task\'s read-only peer. Use the existing assigned model/session when available; do not edit, accept work, or start another task.', [incoming], profile.id, profile.id === task.profileId ? task.sessionId : undefined, effort);
+      }
     } else if (answers.length) {
       for (const m of answers) box.assertFresh(m);
       const outstanding = box.all().filter(m => m.kind === 'question' && m.fromTaskId === task.id && !['closed', 'rejected'].includes(m.status));
       if (outstanding.some(q => !answers.some(a => a.replyTo === q.id))) return undefined;
-      if (task.sessionId && this.profiles('implementer').some(p => p.id === task.profileId)) add('CONTINUE_AFTER_PEER', 'Append only these validated replies to the original implementation session, preserving its model and workspace. Continue work; the ordinary tests and independent review are still mandatory.', answers, task.profileId, task.sessionId);
+      if (task.sessionId && this.profiles('implementer').some(p => p.id === task.profileId)) add('CONTINUE_AFTER_PEER', 'Append only these validated replies to the original implementation session, preserving its model, effort and workspace. Continue work; the ordinary tests and independent review are still mandatory.', answers, task.profileId, task.sessionId, task.effort);
     } else return undefined;
     add('ASK_USER', 'Pause for clarification of the peer conversation or unavailable session/model. Never silently replace the original session.', []);
     add('PAUSE', 'Pause communication and preserve the files and message history.', []);
