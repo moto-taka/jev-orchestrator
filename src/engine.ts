@@ -1096,7 +1096,7 @@ export class Engine extends EventEmitter {
         const before = run.config.profiles.find(p => p.id === task.profileId), after = next.profiles.find(p => p.id === task.profileId);
         const changed = contextChanged || !after?.enabled || hash(before ?? null) !== hash(after);
         this.store.updateTask(task.id, { implementationGrant: undefined, reviewGrant: undefined, acceptanceGrant: undefined, finalVerificationPending: false, verificationFailure: undefined, assessments: undefined, contextIds: contextChanged ? [] : task.contextIds,
-          ...(changed ? { profileId: undefined, sessionId: undefined, sessionFingerprint: undefined, observedModel: undefined } : {}),
+          ...(changed ? { profileId: undefined, effort: undefined, activeEffort: undefined, sessionId: undefined, sessionFingerprint: undefined, observedModel: undefined } : {}),
           ...(task.phase === 'done' && !task.snapshot ? {} : { phase: task.snapshot ? 'verify' : 'assess', status: 'reported', testsPassed: undefined, testedSnapshot: undefined, reviewedSnapshot: undefined, reviewCount: 0, staged: false }) });
       }
       this.store.put('approvals', id('policy'), run.id, { oldPolicyHash: hash(run.config), newPolicyHash: hash(next), trust, by: 'user', time: now() });
