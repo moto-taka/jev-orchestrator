@@ -25,7 +25,9 @@ brew install moto-taka/jev-orchestrator/jvo
 jvo setup
 ```
 
-Node.js 24はHomebrewが依存として用意します。既存CLIの認証は変更しません。固定commitからビルドし、Jevへの接続は初回設定時にだけ行います。[更新・認証・検証範囲](docs/homebrew.md)
+Node.js 24はHomebrewが依存として用意します。既存CLIの認証は変更しません。固定commitからビルドし、インストール時にはJev APIへ接続しません。[更新・認証・検証範囲](docs/homebrew.md)
+
+macOS上で `brew tap`・`brew install`・`brew test` が成功しています（[検証run](https://github.com/moto-taka/jev-orchestrator/actions/runs/35309383943)、formula commit `6173583`）。CIでは認証済みcheckoutのローカルGitミラーを使用し、利用者のSSH認証そのものや実Jev APIを試験したわけではありません。
 
 ### ソース / npm経由
 
