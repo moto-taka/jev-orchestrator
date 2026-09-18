@@ -27,13 +27,13 @@ export function wrap(s: string, width: number): string[] {
   }
   return out;
 }
-export interface ScreenState { input: string; cursor: number; panel: string; scroll: number; notice?: string; detail?: string; demo?: boolean; agentIndex?: number; agentFocus?: boolean; }
+export interface ScreenState { input: string; cursor: number; panel: string; scroll: number; notice?: string; detail?: string; demo?: boolean; agentIndex?: number; agentSelected?: boolean; agentFocus?: boolean; }
 export const COMMANDS = ['/agents', '/tasks', '/diff', '/why', '/messages', '/usage', '/pause', '/resume', '/apply', '/recover', '/refresh', '/cancel', '/detach', '/help', '/exit'];
 const labels: Record<string, string> = { running: '実行中', paused: '一時停止', blocked: '確認待ち', ready_for_user_apply: '反映待ち', applied: '反映済み', cancelled: '取消済み', queued: '待機', waiting_for_peer: '担当の返答待ち', reported: '報告済み', reviewing: 'レビュー中', verifying: '検証中', accepted: '承認済み', done: '完了', rework: '修正中', staging: '統合中' };
 const number = (v?: number) => v === undefined ? '不明' : new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
 export interface AgentCard {
   invocationId: string; taskId: string; taskSpecId: string; profileId: string;
-  label: string; role: string; status: 'running' | 'done' | 'error';
+  label: string; prefix: string; alias: string; model: string; role: string; status: 'running' | 'done' | 'error';
   lastText?: string; lastType?: AgentTrace['type']; time: string; observedModel?: string; configuredModel?: string; sessionId?: string;
   events: AgentTrace[];
 }
@@ -63,25 +63,52 @@ export function agentCards(view: View | undefined): AgentCard[] {
     const sessionId = [...events].reverse().find(e => e.sessionId)?.sessionId;
     const status: AgentCard['status'] = last.type === 'error' ? 'error' : last.type === 'completed' ? 'done' : 'running';
     const lastVisible = [...events].reverse().find(e => e.text && !['session','model'].includes(e.type));
+    const profile = view?.agents.find(x => x.id === first.profileId);
     cards.push({ invocationId, taskId: first.taskId, taskSpecId: first.taskSpecId, profileId: first.profileId,
-      label: profileLabel(view, first.profileId, observed, configured), role: first.role, status,
+      label: profileLabel(view, first.profileId, observed, configured), prefix: profile?.adapter ?? first.adapter,
+      alias: profile?.modelName ?? configured ?? observed ?? 'default', model: modelLabel(profile, observed, configured), role: first.role, status,
       lastText: lastVisible?.text, lastType: lastVisible?.type, time: last.time, observedModel: observed, configuredModel: configured, sessionId, events });
   }
   if (!cards.length && view?.tasks.length) {
     for (const t of view.tasks.filter(t => t.activeProfileId && ['running','reviewing','verifying','waiting_for_peer'].includes(t.status))) {
       const p = view.agents.find(x => x.id === t.activeProfileId);
       cards.push({ invocationId: 'task:' + t.id, taskId: t.id, taskSpecId: t.spec.id, profileId: t.activeProfileId!,
-        label: profileLabel(view, t.activeProfileId!, t.observedModel), role: t.activeRole ?? t.phase, status: 'running',
+        label: profileLabel(view, t.activeProfileId!, t.observedModel), prefix: p?.adapter ?? 'agent',
+        alias: p?.modelName ?? p?.model ?? t.observedModel ?? 'default', model: modelLabel(p, t.observedModel), role: t.activeRole ?? t.phase, status: 'running',
         lastText: t.lastActivity, time: '', observedModel: t.observedModel, configuredModel: p?.model, sessionId: t.sessionId, events: [] });
     }
   }
   return cards.sort((a, b) => (a.status === 'running' ? 0 : a.status === 'error' ? 1 : 2) - (b.status === 'running' ? 0 : b.status === 'error' ? 1 : 2) || b.time.localeCompare(a.time));
 }
 
+
+function inputLayout(input: string, cursor: number, width: number, maxRows: number): { lines: string[]; cursorRow: number; cursorColumn: number; hiddenAbove: boolean; hiddenBelow: boolean } {
+  const inner = Math.max(4, width - 4), chars = graphemes(input), out: string[] = [];
+  let line = '', cells = 0, cursorLine = 0, cursorColumn = 0, captured = false;
+  const capture = (index: number) => {
+    if (captured || index !== cursor) return;
+    cursorLine = out.length; cursorColumn = cells; captured = true;
+  };
+  for (let i = 0; i <= chars.length; i++) {
+    capture(i);
+    if (i === chars.length) break;
+    const g = chars[i]!;
+    if (g === '\n') { out.push(line); line = ''; cells = 0; continue; }
+    const w = cellWidth(g);
+    if (cells + w > inner && line) { out.push(line); line = ''; cells = 0; capture(i); }
+    line += g; cells += w;
+  }
+  out.push(line);
+  if (!captured) { cursorLine = out.length - 1; cursorColumn = cells; }
+  const rows = Math.max(1, Math.min(maxRows, out.length));
+  let start = Math.max(0, cursorLine - rows + 1);
+  if (start + rows > out.length) start = Math.max(0, out.length - rows);
+  return { lines: out.slice(start, start + rows), cursorRow: cursorLine - start, cursorColumn, hiddenAbove: start > 0, hiddenBelow: start + rows < out.length };
+}
 export function renderScreen(view: View | undefined, state: ScreenState, columns: number, rows: number): { lines: string[]; cursor: { row: number; column: number } } {
   const width = Math.max(20, columns - 2), height = Math.max(8, rows), run = view?.run;
   const lines: string[] = [];
-  lines.push(`  ▐▛██▜▌  jvo  0.3.1${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
+  lines.push(`  ▐▛██▜▌  jvo  0.3.2${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
   lines.push(`  ▝▜██▛▘  ${run ? basename(run.repo) : 'Jev Orchestrator'}  ·  ${run ? state.demo ? 'DEMO fixture / 本番API未使用' : `${run.config.decision.provider} / ${run.config.decision.model}` : '判断はJev、作業はお使いのCLIへ。'}`);
   lines.push(`    ▘▘    ${run ? `${labels[run.status] ?? run.status}  ·  ${run.id.slice(0, 16)}` : 'タスクを入力してください。 /help で操作を確認できます。'}`);
   lines.push('');
@@ -165,14 +192,8 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
     for (const e of view?.events.slice(-10) ?? []) { if (!e.text) continue; content.push(`  ${e.kind === 'decision' ? '◆ Jev ' : e.kind.startsWith('worker') ? '└' : e.kind === 'blocked' ? '!' : '●'} ${e.text}`); }
     if (!run) content.push('  いつものターミナルで、複数のCLIをひとつの流れに。', '', '  Jevは担当・難易度・差し戻し・承認だけを判断します。', '  実装とレビューは既存CLIが行い、セッションを維持します。');
     if (cards.length) {
-      content.push('', '  Agents');
-      const selectedIndex = Math.min(state.agentIndex ?? 0, cards.length - 1);
-      for (const [i, a] of cards.slice(0, 8).entries()) {
-        const marker = i === selectedIndex ? '›' : ' ', icon = a.status === 'running' ? '●' : a.status === 'error' ? '!' : '✓';
-        content.push(`  ${marker} ${icon} ${a.label} · ${a.role} · ${a.taskSpecId} · ${a.status === 'running' ? '実行中' : a.status === 'error' ? 'エラー' : '完了'}`);
-        if (a.lastText) content.push(`      └ ${(a.lastType === 'tool' ? 'tool · ' : '') + a.lastText.replace(/\n/g, ' ').slice(0, Math.max(10, width - 14))}`);
-      }
-      content.push('      Tab: agent選択 · Enter: 実行ストリームを開く');
+      const active = cards.filter(a => a.status === 'running').length;
+      content.push('', `  ${active ? '●' : '✓'} agents ${active} running / ${cards.length} total  ·  ↓で選択、Enterで実行を表示`);
     } else if (view?.tasks.length) {
       content.push('');
       const visible = view.tasks.filter(t => t.phase !== 'done').slice(0, 5);
@@ -183,22 +204,41 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
     }
     if (view?.tasks.length) content.push(`    完了 ${view.tasks.filter(t => t.staged).length}/${view.tasks.length} · 同時実行 ${view.tasks.filter(t => ['running', 'verifying', 'reviewing'].includes(t.status)).length}/${run?.config.runtime.maxParallel}`);
   }
-  const wrapped = content.flatMap(s => wrap(s, width));
-  const available = Math.max(1, height - lines.length - 6);
-  const end = Math.max(available, wrapped.length - state.scroll), start = Math.max(0, end - available);
-  lines.push(...wrapped.slice(start, end));
-  while (lines.length < height - 6) lines.push('');
-  lines.push(fit(state.notice ? `  ${state.notice}` : run?.blockReason ? `  ! ${run.blockReason}` : '', width));
+  const wrapped = content.flatMap(line => wrap(line, width));
+  const inputMaxRows = Math.max(2, Math.min(8, Math.floor(height / 3)));
+  const inputView = inputLayout(state.input, state.cursor, width, inputMaxRows);
+  const footerRows = 1 + 1 + inputView.lines.length + 1 + 2;
+  const available = Math.max(1, height - lines.length - footerRows);
+  const maxScroll = Math.max(0, wrapped.length - available);
+  const scroll = Math.min(Math.max(0, state.scroll), maxScroll);
+  const end = Math.max(0, wrapped.length - scroll), start = Math.max(0, end - available);
+  const visibleContent = wrapped.slice(start, end);
+  lines.push(...visibleContent);
+  while (lines.length < height - footerRows) lines.push('');
+  const scrollHint = maxScroll > 0 ? `  PgUp/PgDn ${Math.round((maxScroll - scroll) / Math.max(1, maxScroll) * 100)}%` : '';
+  lines.push(fit(state.notice ? `  ${state.notice}` : run?.blockReason ? `  ! ${run.blockReason}` : scrollHint, width));
   lines.push('─'.repeat(width));
-  const chars = graphemes(state.input), cursorText = chars.slice(0, state.cursor).join('');
-  let offset = 0;
-  while (cellWidth(chars.slice(offset, state.cursor).join('')) > width - 5 && offset < state.cursor) offset++;
-  const input = fit(chars.slice(offset).join('').replace(/\n/g, ' ↵ '), width - 4);
-  const cursorRow = lines.length + 1;
-  lines.push(`❯ ${input}`);
+  const inputRowStart = lines.length + 1;
+  for (const [i, line] of inputView.lines.entries()) {
+    const prefix = i === 0 ? '❯ ' : '  ';
+    const marker = i === 0 && inputView.hiddenAbove ? '…' : i === inputView.lines.length - 1 && inputView.hiddenBelow ? '…' : '';
+    lines.push(fit(prefix + line + marker, width));
+  }
   lines.push('─'.repeat(width));
-  const matches = state.agentFocus ? 'Esc: 親画面  ·  ↑↓: agent切替  ·  PgUp/PgDn: スクロール' : state.input.startsWith('/') ? COMMANDS.filter(c => c.startsWith(state.input.split(' ')[0]!)).join('  ') : cards.length ? 'Tab/Shift+Tab: agent選択  ·  Enter: agentを開く  ·  /agents  /tasks  /messages  /why' : '/agents  /tasks  /messages  /diff  /why  /usage   ·   Tabで補完';
-  lines.push(fit(`  ${matches}`, width));
-  lines.push(fit('  Jev decides. Your CLIs build.  ·  元の作業場への反映は /apply', width));
-  return { lines: lines.slice(0, height).map(s => fit(s, width)), cursor: { row: Math.min(height, cursorRow), column: 3 + cellWidth(chars.slice(offset, state.cursor).join('').replace(/\n/g, ' ↵ ')) } };
+  const selectedIndex = cards.length ? Math.min(state.agentIndex ?? 0, cards.length - 1) : 0;
+  const selected = cards[selectedIndex];
+  if (selected) {
+    const icon = selected.status === 'running' ? '●' : selected.status === 'error' ? '!' : '✓';
+    const selection = state.agentSelected || state.agentFocus ? '›' : ' ';
+    lines.push(fit(`  ${selection} ↓ agents ${selectedIndex + 1}/${cards.length}  ${icon} ${selected.label} · ${selected.role} · ${selected.taskSpecId} · Enterで実行を見る`, width));
+    lines.push(fit(`    prefix ${selected.prefix} · alias ${selected.alias} · model ${selected.model} · ↑↓ 選択 · Esc 戻る`, width));
+  } else {
+    const commandHint = state.input.startsWith('/') ? COMMANDS.filter(c => c.startsWith(state.input.split(' ')[0]!)).join('  ') : '/agents  /tasks  /messages  /diff  /why  /usage';
+    lines.push(fit(`  ${commandHint}`, width));
+    lines.push(fit('  Shift+Enter / Ctrl+J: 改行 · Enter: 送信 · PgUp/PgDn: 履歴スクロール', width));
+  }
+  const cursorRow = inputRowStart + inputView.cursorRow;
+  const cursorColumn = Math.min(width, 3 + inputView.cursorColumn);
+  return { lines: lines.slice(0, height).map(line => fit(line, width)), cursor: { row: Math.min(height, cursorRow), column: cursorColumn } };
+
 }

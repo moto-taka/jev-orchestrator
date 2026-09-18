@@ -7,7 +7,7 @@ function fixture(): View {
   return {
     agents: [{
       id: 'pi_231b6b4926dfb0478b8f', adapter: 'pi', binary: '/usr/bin/pi', version: '0.85.1',
-      model: 'qwen3-coder', provider: 'openrouter', roles: ['scout','planner','implementer','reviewer','explainer'],
+      model: 'qwen3-coder', provider: 'openrouter', modelName: 'Qwen 3 Coder', roles: ['scout','planner','implementer','reviewer','explainer'],
       enabled: true, level: 'trusted-local', capabilityHash: 'x', maxTurns: 20, timeoutMs: 1000,
     }],
     tasks: [{
@@ -29,8 +29,8 @@ test('parent TUI shows human CLI/model/role instead of opaque profile id', () =>
   assert.equal(cards[0]?.label, 'Pi · openrouter/qwen3-coder');
   const state: ScreenState = { input: '', cursor: 0, panel: '', scroll: 0, agentIndex: 0 };
   const screen = renderScreen(view, state, 120, 34).lines.join('\n');
-  assert.match(screen, /Pi · openrouter\/qwen3-coder · scout · T1 · 実行中/);
-  assert.match(screen, /tool · read src\/auth\.ts/);
+  assert.match(screen, /Pi · openrouter\/qwen3-coder · scout · T1/);
+  assert.match(screen, /prefix pi · alias Qwen 3 Coder · model openrouter\/qwen3-coder/);
   assert.doesNotMatch(screen, /pi_231b6b4926dfb0478b8f/);
 });
 
@@ -49,4 +49,34 @@ test('observed model wins over configured model in the agent card', () => {
   const view = fixture();
   view.agentEvents!.push({ ...view.agentEvents![2]!, time: '2026-09-19T00:50:03.000Z', type: 'model', observedModel: 'qwen3-coder-v2', text: 'qwen3-coder-v2' });
   assert.equal(agentCards(view)[0]?.label, 'Pi · openrouter/qwen3-coder-v2');
+});
+
+
+test('multiline prompt is rendered on real wrapped rows instead of a single ↵ placeholder row', () => {
+  const view = fixture();
+  const input = 'first line\nsecond line with more text';
+  const state: ScreenState = { input, cursor: [...input].length, panel: '', scroll: 0, agentIndex: 0 };
+  const lines = renderScreen(view, state, 60, 24).lines;
+  assert(lines.some(line => line.includes('❯ first line')));
+  assert(lines.some(line => line.includes('second line with more text')));
+  assert(!lines.some(line => line.includes(' ↵ ')));
+});
+
+test('scroll offset exposes older long content for PgUp/PgDn state changes', () => {
+  const view = fixture();
+  const detail = Array.from({ length: 40 }, (_, i) => `line-${String(i).padStart(2, '0')}`).join('\n');
+  const newest = renderScreen(view, { input: '', cursor: 0, panel: '/diff', detail, scroll: 0 }, 80, 20).lines.join('\n');
+  const older = renderScreen(view, { input: '', cursor: 0, panel: '/diff', detail, scroll: 12 }, 80, 20).lines.join('\n');
+  assert.match(newest, /line-39/);
+  assert.doesNotMatch(older, /line-39/);
+  assert.match(older, /line-2[0-9]/);
+});
+
+test('footer selection metadata follows OpenClaude-style model and route status placement', () => {
+  const view = fixture();
+  const screen = renderScreen(view, { input: '', cursor: 0, panel: '', scroll: 0, agentIndex: 0, agentSelected: true }, 120, 26).lines.join('\n');
+  assert.match(screen, /› ↓ agents 1\/1/);
+  assert.match(screen, /Pi · openrouter\/qwen3-coder · scout · T1/);
+  assert.match(screen, /prefix pi · alias Qwen 3 Coder · model openrouter\/qwen3-coder/);
+  assert.match(screen, /↑↓ 選択 · Esc 戻る/);
 });
