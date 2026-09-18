@@ -581,12 +581,14 @@ export class Engine extends EventEmitter {
     }
     for (const f of task.findings) if (f.duplicateOf && resolutions[f.duplicateOf]) resolutions[f.id] = resolutions[f.duplicateOf]!;
     const criticalResolved = task.findings.every(f => f.severity !== 'blocker' || f.status === 'fixed' || f.status === 'not-applicable' || !!resolutions[f.id]);
-    const add = (kind: Candidate['kind'], reason: string, profileId?: string, specialization?: string) => {
-      const c = { kind, reason, taskId: task.id, profileId, specialization, workspace: task.workspace,
+    const add = (kind: Candidate['kind'], reason: string, profileId?: string, specialization?: string, effort?: string) => {
+      const c = { kind, reason, taskId: task.id, profileId, effort, specialization, workspace: task.workspace,
         sessionId: kind === 'REWORK_SAME_SESSION' ? task.sessionId : undefined, evidenceIds: task.evidence.map(e => e.id) };
       list.push({ ...c, ...(kind === 'ACCEPT_TASK' ? { findingResolutions: resolutions } : {}), id: `C_${hash({ ...c, resolutions: kind === 'ACCEPT_TASK' ? resolutions : undefined }).slice(0, 14)}` });
     };
-    const propose = (kind: Candidate['kind'], role: Role, reason: string) => { for (const p of this.profiles(role)) add(kind, reason, p.id); };
+    const propose = (kind: Candidate['kind'], role: Role, reason: string) => {
+      for (const p of this.profiles(role)) for (const effort of this.profileEfforts(p)) add(kind, reason, p.id, undefined, effort);
+    };
     if (task.phase === 'assess') {
       propose('START_TASK', 'implementer', 'Implement this task directly; use the task worktree and submit proof.');
       if (task.diagnoses < 2) {
@@ -597,13 +599,11 @@ export class Engine extends EventEmitter {
       if (task.proposedPlan?.length) add('ACCEPT_PLAN', 'Adopt the proposed bounded, acyclic task graph only if it fully preserves the requested scope.');
       if (task.diagnoses < 3) propose('REQUEST_PLAN', 'planner', 'Revise the proposal without expanding scope.');
     } else if (task.phase === 'implement' || task.phase === 'judge') {
-      const adequate = (checks.evidenceAdequate as { probability?: number } | undefined)?.probability ?? 0;
-      const met = (checks.requirementsMet as { probability?: number } | undefined)?.probability ?? 0;
-      if (task.phase === 'judge' && this.acceptable(task) && criticalResolved && adequate >= this.run.config.thresholds.evidence && met >= (task.requiredReviews > 1 ? this.run.config.thresholds.highRiskAccept : this.run.config.thresholds.accept)) add('ACCEPT_TASK', 'The current snapshot has runtime verification and independent reviews; close findings only if all requirements are actually met.');
+      if (task.phase === 'judge' && this.acceptable(task) && criticalResolved && this.reviewGatePass(task, checks)) add('ACCEPT_TASK', 'The current snapshot passed the diff-and-requirements Jev Review Gate with current runtime verification and independent review.');
       if (task.attempts < this.run.config.runtime.maxRepairs && task.sameFailure < this.run.config.runtime.maxSameFailure) {
-        if (task.sessionId && task.profileId) add('REWORK_SAME_SESSION', 'Repair the unresolved findings in the same implementation session and workspace.', task.profileId);
+        if (task.sessionId && task.profileId) add('REWORK_SAME_SESSION', 'Repair the unresolved findings in the same implementation session, model, effort and workspace.', task.profileId, undefined, task.effort);
         else propose('START_TASK', 'implementer', 'Continue the retained task workspace with a new explicitly selected session.');
-        for (const p of this.profiles('implementer').filter(p => p.id !== task.profileId)) add('REASSIGN_TASK', 'Choose only for a demonstrated capability or availability mismatch; preserve the task workspace.', p.id);
+        for (const p of this.profiles('implementer').filter(p => p.id !== task.profileId)) for (const effort of this.profileEfforts(p)) add('REASSIGN_TASK', 'Choose only for a demonstrated capability or availability mismatch; preserve the task workspace.', p.id, undefined, effort);
       }
       if (task.diagnoses < 3) propose('REQUEST_EVIDENCE', 'scout', 'Resolve missing proof or diagnose repeated failure without editing or treating capacity problems as task difficulty.');
       if (task.snapshot && task.reviewCount < task.requiredReviews + 2) propose('REQUEST_REVIEW', 'reviewer', 'Re-examine disputed findings or missing evidence in an independent session.');
