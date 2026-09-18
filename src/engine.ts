@@ -36,7 +36,7 @@ export async function startRun(store: Store, cwd: string, goal: string, config: 
   if (Array.isArray(options.baseline)) base = await ws.captureSelected(head, options.baseline, runId);
   if (options.mode === 'in-place' && isDirty) invariant(Array.isArray(options.baseline), 'In-place mode with pre-existing edits requires --include for the approved baseline.');
   const branch = `jvo/${runId}/integration`, integration = await ws.create(`${runId}_integration`, base, branch);
-  const run: Run = { id: runId, repo, repoId: rid, goal: goal.trim(), scopeVersion: 1, createdAt: now(), updatedAt: now(), status: 'running',
+  const run: Run = { id: runId, controlVersion: 'lean-v1', repo, repoId: rid, goal: goal.trim(), scopeVersion: 1, createdAt: now(), updatedAt: now(), status: 'running',
     base, checkoutHead: head, checkoutFingerprint, integration, integrationBranch: branch, integrationHead: base, mode: options.mode ?? 'worktree',
     config: JSON.parse(JSON.stringify(config)), trust, workerStarts: 0, decisionCalls: 0, instructionVersion: hash(REPORT_CONTRACT), detached: false, activeMs: 0, activeSince: now() };
   const task = makeTask(run, { id: 'T1', title: goal.slice(0, 120), instruction: goal, acceptance: ['The requested behavior is implemented and verified without regressions.'], dependsOn: [], readPaths: ['**'], writePaths: ['**'], resources: [] });
@@ -53,6 +53,7 @@ export class Engine extends EventEmitter {
     super(); this.store = store; this.runId = runId; this.provider = provider; this.guard = options.guard ?? new SecretGuard();
     this.resourceStore = options.resourceStore ?? store; this.adapter = options.adapter ?? new NativeAdapter(this.guard); this.ws = new Workspaces(store.root, store.run(runId).repo);
   }
+  private get lean(): boolean { return this.run.controlVersion === 'lean-v1'; }
   get run(): Run { return this.store.run(this.runId); }
   get mailbox(): Mailbox { return new Mailbox(this.store, this.runId, this.guard); }
   get tasks(): Task[] { return this.store.all<Task>('tasks', this.runId); }
@@ -63,7 +64,7 @@ export class Engine extends EventEmitter {
     const visibleRun = { ...source, trust, config: { ...source.config, trusts: {} } };
     const visibleTasks = this.tasks.map(t => ({ ...t, evidence: t.evidence.map(e => ({ ...e, excerpt: '' })), lastReport: t.lastReport ? { summary: t.lastReport.summary.slice(0, 1000), claims: [], questions: t.lastReport.questions.slice(0, 5) } : undefined,
       proposedPlan: undefined, findings: t.findings.slice(-10).map(f => ({ ...f, evidence: f.evidence.slice(0, 1000) })) }));
-    return { messages: this.mailbox.all().map(m => ({ ...m, body: clip(m.body, 2000).text })), run: visibleRun, tasks: visibleTasks, agents: source.config.profiles, usage: this.store.all('usage', this.runId),
+    return { runtimeTransitions: this.store.all<Operation>('outbox', this.runId).filter(o => o.policy).slice(-100).map(o => ({ rule: o.policy!.rule, action: o.candidate.kind, sourceDecisionId: o.decisionId, state: o.state })), messages: this.mailbox.all().map(m => ({ ...m, body: clip(m.body, 2000).text })), run: visibleRun, tasks: visibleTasks, agents: source.config.profiles, usage: this.store.all('usage', this.runId),
       decisions: this.store.all<Decision>('decisions', this.runId).slice(-100), events: this.store.events(this.runId, 200).filter(e => typeof e.data.text === 'string' && e.data.text.length > 0).map(e => ({ time: e.time, kind: e.kind, taskId: typeof e.data.taskId === 'string' ? e.data.taskId : undefined, text: terminalText(String(e.data.text)) })) };
   }
   log(kind: string, text: string, taskId?: string): void { this.store.event(this.runId, kind, { text: this.guard.redact(terminalText(text)).slice(0, 5000), taskId }); this.notify(); }
@@ -116,7 +117,26 @@ export class Engine extends EventEmitter {
       await this.executeOperation(op, signal); return;
     }
     const peerCandidates = this.peerCandidates(task);
-    if (peerCandidates) { await this.selectAndRun(task, peerCandidates, {}, signal); return; }
+    if (peerCandidates) {
+      if (this.lean && await this.runMechanicalPeer(task, peerCandidates, signal)) return;
+      await this.selectAndRun(task, peerCandidates, {}, signal); return;
+    }
+    if (this.lean && task.phase === 'stage' && task.acceptanceGrant) {
+      const candidate = this.candidates(task, {}).find(c => c.kind === 'STAGE_INTEGRATION')!;
+      await this.runPolicy(task, candidate, 'task.stage', task.acceptanceGrant.decisionId, signal); return;
+    }
+    if (this.lean && task.phase === 'implement' && this.canRepair(task)) {
+      const candidate = this.candidates(task, {}).find(c => c.kind === 'REWORK_SAME_SESSION');
+      if (candidate) { await this.runPolicy(task, candidate, 'task.repair', task.implementationGrant!.decisionId, signal); return; }
+    }
+    if (this.lean && task.phase === 'review' && this.canRepeatReview(task)) {
+      const candidate = this.candidates(task, {}).find(c => c.kind === 'REQUEST_REVIEW' && c.profileId === task.reviewGrant!.profileId);
+      if (candidate) { await this.runPolicy(task, candidate, 'task.review', task.reviewGrant!.decisionId, signal); return; }
+    }
+    if (this.lean && task.phase === 'verify' && task.finalVerificationPending && task.acceptanceGrant) {
+      const candidate: Candidate = { id: `final-verify-${task.id}-${task.snapshot}`, kind: 'REQUEST_EVIDENCE', taskId: task.id, reason: 'runtime.verify', evidenceIds: task.evidence.map(e => e.id) };
+      await this.runPolicy(task, candidate, 'task.final-verify', task.acceptanceGrant.decisionId, signal); return;
+    }
     if (task.phase === 'verify') {
       if (task.kind === 'integration') {
         const current = await git(this.run.integration, ['rev-parse', 'HEAD']);
@@ -128,7 +148,7 @@ export class Engine extends EventEmitter {
       }
       // Verification is a mechanical consequence of the already authorized worker action.
       // Journal it in the same outbox so a crash never silently repeats an arbitrary test command.
-      const origin = this.store.all<Decision>('decisions', this.runId).filter(d => d.outcome === 'execute' && d.selected && (d.taskId === task.id || task.kind === 'integration' && d.selected.kind === 'STAGE_INTEGRATION')).at(-1);
+      const origin = this.store.all<Decision>('decisions', this.runId).filter(d => d.outcome === 'execute' && d.selected && (d.taskId === task.id || task.kind === 'integration' && (d.selected.kind === 'STAGE_INTEGRATION' || this.lean && d.selected.kind === 'REQUEST_REVIEW'))).at(-1);
       invariant(origin, 'Verification requires a prior authorized decision');
       const candidate: Candidate = { id: `verify-${task.id}-${task.version}`, kind: 'REQUEST_EVIDENCE', taskId: task.id, reason: 'runtime.verify', evidenceIds: task.evidence.map(e => e.id) };
       const op: Operation = { id: id('verify'), runId: this.runId, taskId: task.id, decisionId: origin.id, candidate, state: 'pending' };
@@ -137,26 +157,43 @@ export class Engine extends EventEmitter {
     }
     if (task.phase === 'assess' && !task.assessments) {
       const items = [...await repositoryContext(this.run.repo, task.snapshot ?? this.run.integrationHead, task, this.run.trust), ...skillContext(this.run.trust)];
-      if (items.length) {
+      if (items.length && this.lean) {
+        // Path/manifest/skill selection is local. Do not spend an inference deciding
+        // whether a bounded list of already-ranked sources is worth reading.
+        let remaining = Math.floor(this.run.trust.maxEvidenceBytes / 2);
+        const selected = items.filter(i => { const size = Buffer.byteLength(i.content); if (size > remaining) return false; remaining -= size; return true; });
+        task = this.store.updateTask(taskId, { contextIds: selected.map(i => this.store.artifact(this.runId, `SOURCE: ${i.path}\n${i.content}`)) });
+      } else if (items.length) {
         const { evaluation, fresh } = await this.evaluate(task, json({ task: task.spec, sources: items.map(i => ({ id: i.id, description: i.description, content: i.content })) }), relevanceQuestions(items), signal);
         if (!fresh) return;
         const selected = items.filter(i => { const a = evaluation.answers[i.id]; return a?.kind === 'boolean' && a.probability >= 0.65; });
         const contextIds = selected.map(i => this.store.artifact(this.runId, `SOURCE: ${i.path}\n${i.content}`));
         task = this.store.updateTask(taskId, { contextIds });
       }
+      if (!this.lean) {
       const { evaluation, fresh } = await this.evaluate(task, this.state(task), assessmentQuestions(), signal);
       if (!fresh) return;
       const risk = evaluation.answers.risk;
       const requiredReviews = (risk?.kind === 'score' && risk.value >= 1.3) || /auth|payment|billing|migration|認証|課金|権限|個人情報/i.test(task.spec.instruction) ? 2 : 1;
       task = this.store.updateTask(taskId, { assessments: evaluation.answers, requiredReviews });
+      }
     }
     let assessments: Record<string, unknown> = {};
     if (task.phase === 'judge') {
       const questions = evidenceQuestions(task);
-      for (const finding of task.findings.slice(-50)) questions[`finding_${hash(finding.id).slice(0, 12)}`] = { type: 'choice', instructions: `Using the actual current-snapshot proof, classify finding ${finding.id}: ${finding.requirement}. Do not trust a worker's self-asserted fix.`, criteria: { fixed: 'The defect is demonstrably fixed and verified.', 'not-applicable': 'The finding is demonstrably not applicable to the approved requirement.', open: 'The concern remains or proof is insufficient.', disputed: 'The evidence is contradictory and needs independent investigation.' } };
-      const { evaluation, fresh } = await this.evaluate(task, this.state(task), questions, signal);
-      if (!fresh) return;
-      assessments = evaluation.answers;
+      for (const finding of task.findings.filter(f => !this.lean || (!f.duplicateOf && !['fixed', 'not-applicable'].includes(f.status))).slice(-50)) questions[`finding_${hash(finding.id).slice(0, 12)}`] = { type: 'choice', instructions: `Using the actual current-snapshot proof, classify finding ${finding.id}: ${finding.requirement}. Do not trust a worker's self-asserted fix.`, criteria: { fixed: 'The defect is demonstrably fixed and verified.', 'not-applicable': 'The finding is demonstrably not applicable to the approved requirement.', open: 'The concern remains or proof is insufficient.', disputed: 'The evidence is contradictory and needs independent investigation.' } };
+      const verdict = { id: `verdict-${task.id}-${task.snapshot}`, kind: 'ACCEPT_TASK' as const,
+        taskId: task.id, reason: 'Current-snapshot evidence satisfies the acceptance rubric', evidenceIds: task.evidence.map(e => e.id) };
+      const state = this.lean ? json({ ...this.state(task, 'verdict') as object, candidates: [verdict] }) : this.state(task);
+      const result = await this.evaluate(task, state, questions, signal);
+      if (!result.fresh) return;
+      assessments = result.evaluation.answers;
+      const accepted = this.candidates(task, assessments).find(c => c.kind === 'ACCEPT_TASK');
+      if (this.lean && accepted) {
+        // The verdict IS the approval; do not ask the same model to approve it again.
+        const candidate = { ...accepted, id: verdict.id };
+        await this.runPolicy(task, candidate, 'task.accept-verdict', result.decisionId, signal); return;
+      }
     }
     task = this.store.task(taskId);
     const candidates = this.candidates(task, assessments);
@@ -165,10 +202,29 @@ export class Engine extends EventEmitter {
   private async selectAndRun(task: Task, candidates: Candidate[], assessments: Record<string, unknown>, signal: AbortSignal): Promise<void> {
     const taskId = task.id;
     const refs = this.store.refs(task);
-    const { evaluation, source, decisionId, fresh, stateHash, questionHash } = await this.evaluate(task, json({ ...this.state(task) as Record<string, Json>, checks: assessments, candidates, peerMessages: [...new Set(candidates.flatMap(c => c.messageIds ?? []))].map(id => this.mailbox.get(id)) }), choiceQuestion(task, candidates), signal, false);
+    // Model suitability and action uncertainty are different. Many equally suitable
+    // models must not dilute an otherwise clear action into a low-confidence stop.
+    const representatives = this.lean ? candidates.filter((c, i) => candidates.findIndex(x => x.kind === c.kind) === i) : candidates;
+    const questions = choiceQuestion(task, representatives);
+    if (this.lean) {
+      for (const action of representatives) {
+        const profiles = [...new Set(candidates.filter(c => c.kind === action.kind && c.profileId).map(c => c.profileId!))];
+        if (profiles.length > 1) questions[`model_${action.kind}`] = { type: 'choice',
+          instructions: `Independently of whether action ${action.kind} is needed, choose a suitable allowed model for that role. Use supplied model metadata and the task evidence. Equal suitability is not a task blocker. Do not change a fixed existing session.`,
+          criteria: Object.fromEntries(profiles.map(id => [id, canonical(this.modelFacts(this.run.config.profiles.find(p => p.id === id)!))])) };
+      }
+      if (task.phase === 'assess' && !task.assessments) Object.assign(questions, assessmentQuestions());
+    }
+    const { evaluation, source, decisionId, fresh, stateHash, questionHash } = await this.evaluate(task, json({ ...this.state(task) as Record<string, Json>, checks: assessments, candidates, peerMessages: [...new Set(candidates.flatMap(c => c.messageIds ?? []))].map(id => this.mailbox.get(id)) }), questions, signal, false);
     if (!fresh) return;
     const answer = evaluation.answers.action; invariant(answer?.kind === 'choice', 'Jev did not choose an action');
-    const chosen = candidates.find(c => c.id === answer.selected); invariant(chosen, 'Jev selected an unknown action');
+    let chosen = representatives.find(c => c.id === answer.selected); invariant(chosen, 'Jev selected an unknown action');
+    const model = evaluation.answers[`model_${chosen.kind}`];
+    if (this.lean && questions[`model_${chosen.kind}`]) {
+      invariant(model?.kind === 'choice', 'Missing model selection');
+      const match = candidates.find(c => c.kind === chosen!.kind && c.profileId === model.selected);
+      invariant(match, 'Jev selected a model outside the allowed action profiles'); chosen = match;
+    }
     const approval = chosen.kind === 'ACCEPT_TASK' || chosen.kind === 'ACCEPT_PLAN';
     const threshold = approval ? task.requiredReviews > 1 ? this.run.config.thresholds.highRiskAccept : this.run.config.thresholds.accept : this.run.config.thresholds.route;
     const isStop = ['ASK_USER', 'PAUSE', 'CANCEL'].includes(chosen.kind);
@@ -206,7 +262,7 @@ export class Engine extends EventEmitter {
       for (const m of answers) box.assertFresh(m);
       const outstanding = box.all().filter(m => m.kind === 'question' && m.fromTaskId === task.id && !['closed', 'rejected'].includes(m.status));
       if (outstanding.some(q => !answers.some(a => a.replyTo === q.id))) return undefined;
-      if (task.sessionId && this.profiles('implementer').some(p => p.id === task.profileId)) add('CONTINUE_AFTER_PEER', 'Append only these Jev-approved replies to the original implementation session, preserving its model and workspace. Continue work; the ordinary tests and independent review are still mandatory.', answers, task.profileId, task.sessionId);
+      if (task.sessionId && this.profiles('implementer').some(p => p.id === task.profileId)) add('CONTINUE_AFTER_PEER', 'Append only these validated replies to the original implementation session, preserving its model and workspace. Continue work; the ordinary tests and independent review are still mandatory.', answers, task.profileId, task.sessionId);
     } else return undefined;
     add('ASK_USER', 'Pause for clarification of the peer conversation or unavailable session/model. Never silently replace the original session.', []);
     add('PAUSE', 'Pause communication and preserve the files and message history.', []);
@@ -221,7 +277,7 @@ export class Engine extends EventEmitter {
       await this.ensureSnapshot(this.store.task(m.kind === 'question' ? m.fromTaskId : m.toTaskId));
     }
     if (c.kind === 'DELIVER_MESSAGE' || c.kind === 'REJECT_MESSAGE') {
-      invariant(messages.length === 1, 'Deliver one semantic message per Jev decision'); const m = messages[0]!;
+      invariant(messages.length === 1, 'Deliver one correlated message per operation'); const m = messages[0]!;
       invariant(m.fromTaskId === task.id && m.status === 'proposed', 'Message was already routed or sender mismatched');
       this.store.tx(() => { box.update(m.id, { status: c.kind === 'DELIVER_MESSAGE' ? 'queued' : 'rejected', decisionId: op.decisionId }); complete(); });
       this.log('peer.route', `${task.spec.id} → ${this.store.task(m.toTaskId).spec.id} · ${c.kind === 'DELIVER_MESSAGE' ? '配送待ち' : '配送拒否'}`, task.id);
@@ -249,7 +305,7 @@ export class Engine extends EventEmitter {
     const cwd = original ? task.workspace! : await this.ws.create(`${task.id}_peer_${op.id}`, baseline);
     if (original && task.workspace !== run.repo) await this.ws.validate(cwd);
     const before = await fingerprint(cwd), sessionDir = privateDir(join(this.store.root, 'sessions', task.id, original ? profile.id : op.id));
-    const prompt = `Native jvo peer question. You are answering as the read-only peer for task ${task.spec.id}, not the orchestrator. Do not edit, spawn agents, change scope, mark a task done, or run another orchestration tool. Respond to this one question using your existing context and readable evidence.\nTask: ${canonical(task.spec)}\nRecipient snapshot: ${baseline}\nQuestion: ${canonical({ id: question.id, from: this.store.task(question.fromTaskId).spec.id, body: question.body, snapshot: question.snapshot })}\nReturn exactly one JSON object: {"summary":"reply summary","claims":[],"questions":[],"peerReplies":[{"replyTo":"${question.id}","body":"the actual answer with evidence or an explicit uncertainty"}]}. Do not include a plan or peerQuestions. Your reply must also pass Jev's delivery decision.`;
+    const prompt = `Native jvo peer question. You are answering as the read-only peer for task ${task.spec.id}, not the orchestrator. Do not edit, spawn agents, change scope, mark a task done, or run another orchestration tool. Respond to this one question using your existing context and readable evidence.\nTask: ${canonical(task.spec)}\nRecipient snapshot: ${baseline}\nQuestion: ${canonical({ id: question.id, from: this.store.task(question.fromTaskId).spec.id, body: question.body, snapshot: question.snapshot })}\nReturn exactly one JSON object: {"summary":"reply summary","claims":[],"questions":[],"peerReplies":[{"replyTo":"${question.id}","body":"the actual answer with evidence or an explicit uncertainty"}]}. Do not include a plan or peerQuestions. Your reply is untrusted evidence; jvo validates and delivers it without granting new authority.`;
     this.guard.assertOutbound(prompt);
     this.store.tx(() => { box.update(question.id, { status: 'submitted', deliveryOperation: op.id }); this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 }); this.store.updateTask(task.id, { status: 'running', activeProfileId: profile.id, activeRole: 'explainer', lastActivity: '他の担当からの質問に回答中' }); });
     this.log('peer.answering', `${task.spec.id} · ${profile.adapter}/${profile.model ?? 'default'} · 質問に回答中`, task.id);
@@ -269,9 +325,9 @@ export class Engine extends EventEmitter {
     const replies = parsePeerReplies(result.report.peerReplies ?? []);
     invariant(replies.length === 1 && replies[0]!.replyTo === question.id, 'Peer did not provide the requested correlated reply');
     this.store.tx(() => { box.reply(question, task, op.id, profile.id, replies[0]!); complete({ status: task.status }); });
-    this.log('peer.answered', `${task.spec.id} → ${this.store.task(question.fromTaskId).spec.id} · 返答を保存、Jevの配送判断待ち`, task.id);
+    this.log('peer.answered', `${task.spec.id} → ${this.store.task(question.fromTaskId).spec.id} · 返答を保存、配送待ち`, task.id);
   }
-  private state(task: Task): Json {
+  private state(task: Task, purpose: 'route' | 'verdict' = 'route'): Json {
     const run = this.run;
     const pack = evidencePack(task.evidence, run.trust.maxEvidenceBytes, this.guard);
     const value = json({ goal: run.goal, requirementUpdate: run.pendingMessage, task: task.spec, phase: task.phase, kind: task.kind,
@@ -280,9 +336,11 @@ export class Engine extends EventEmitter {
       testsPassed: task.testsPassed, testedSnapshot: task.testedSnapshot, reviewedSnapshot: task.reviewedSnapshot,
       evidence: pack, findings: task.findings, proposedPlan: task.proposedPlan, lastFailure: task.lastFailure, sameFailure: task.sameFailure,
       peerMessageCounts: { outgoing: this.mailbox.outgoing(task).length, incoming: this.mailbox.questions(task).length },
-      profiles: run.config.profiles.filter(p => p.enabled).map(({ binary: _binary, ...profile }) => profile), context: task.contextIds.map(h => this.store.readArtifact(h)),
-      remainingStarts: run.config.runtime.maxWorkerStarts - run.workerStarts,
-      remainingDecisions: run.config.runtime.maxDecisions - run.decisionCalls });
+      profiles: this.lean ? (purpose === 'route' ? run.config.profiles.filter(p => p.enabled).map(p => this.modelFacts(p)) : undefined) : run.config.profiles.filter(p => p.enabled).map(({ binary: _binary, ...profile }) => profile),
+      context: purpose === 'route' ? task.contextIds.map(h => this.store.readArtifact(h)) : undefined,
+      // Exact counters are enforced at the execution boundary, not mixed into
+      // every semantic memo key. Candidate availability still reflects exhaustion.
+      workerBudgetAvailable: purpose === 'route' ? run.workerStarts < run.config.runtime.maxWorkerStarts : undefined });
     this.guard.assertOutbound(canonical(value));
     invariant(Buffer.byteLength(canonical(value)) < run.trust.maxEvidenceBytes + 200_000, 'Decision state exceeds transmission limit'); return value;
   }
@@ -322,6 +380,118 @@ export class Engine extends EventEmitter {
     }
     return { evaluation, fresh, source: cached?.decisionId, decisionId, stateHash, questionHash };
   }
+  private modelFacts(p: Profile): object {
+    return { id: p.id, cli: p.adapter, provider: p.provider, model: p.model, name: p.modelName,
+      description: p.modelDescription, contextWindow: p.contextWindow, reasoning: p.reasoning,
+      roles: p.roles, level: p.level };
+  }
+  private authorityHash(task: Task): string {
+    const run = this.run;
+    return hash({ task: task.spec, config: run.config, trust: run.trust, goal: run.goal,
+      clarification: run.pendingMessage, instructionVersion: run.instructionVersion });
+  }
+  private proofHash(task: Task): string {
+    return hash({ authority: this.authorityHash(task), snapshot: task.snapshot,
+      testsPassed: task.testsPassed, testedSnapshot: task.testedSnapshot,
+      reviewedSnapshot: task.reviewedSnapshot, reviewCount: task.reviewCount,
+      requiredReviews: task.requiredReviews, findings: task.findings,
+      evidence: task.evidence.map(e => ({ hash: e.sourceHash, snapshot: e.snapshot })) });
+  }
+  private singleDirectTask(task: Task): boolean {
+    return this.tasks.length === 1 && task.kind === 'work' && task.spec.id === 'T1'
+      && task.spec.instruction === this.run.goal && !task.proposedPlan?.length
+      && !this.run.pendingMessage && task.spec.dependsOn.length === 0;
+  }
+  private canRepair(task: Task): boolean {
+    return task.phase === 'implement' && task.verificationFailure === 'assertion'
+      && task.testsPassed === false && task.testedSnapshot === task.snapshot
+      && !!task.sessionId && !!task.implementationGrant
+      && task.implementationGrant.policyHash === this.authorityHash(task)
+      && task.attempts < this.run.config.runtime.maxRepairs
+      && task.sameFailure < this.run.config.runtime.maxSameFailure
+      && this.run.workerStarts < this.run.config.runtime.maxWorkerStarts
+      && !task.lastReport?.questions.length && !this.mailbox.waiting(task)
+      && this.profiles('implementer').some(p => p.id === task.profileId);
+  }
+  private canRepeatReview(task: Task): boolean {
+    const grant = task.reviewGrant, profile = this.profiles('reviewer').find(p => p.id === grant?.profileId);
+    return !!grant && !!profile && task.phase === 'review' && task.testsPassed === true
+      && task.testedSnapshot === task.snapshot && task.reviewCount < task.requiredReviews
+      && this.run.workerStarts < this.run.config.runtime.maxWorkerStarts
+      && grant.policyHash === this.authorityHash(task) && grant.profileHash === hash(profile);
+  }
+  private async runMechanicalPeer(task: Task, candidates: Candidate[], signal: AbortSignal): Promise<boolean> {
+    const c = candidates.find(c => c.kind === 'DELIVER_MESSAGE' || c.kind === 'CONTINUE_AFTER_PEER'
+      || c.kind === 'ANSWER_PEER' && c.sessionId && c.profileId === task.profileId);
+    if (!c) return false; // An unassigned peer genuinely needs a model choice.
+    const message = this.mailbox.get(c.messageIds![0]!);
+    const origin = c.kind === 'ANSWER_PEER' || c.kind === 'CONTINUE_AFTER_PEER'
+      ? task.implementationGrant?.decisionId : this.store.get<Operation>('outbox', message.invocationId)?.decisionId;
+    if (!origin) return false; // Legacy/manual state does not invent a grant.
+    await this.runPolicy(task, c, c.kind === 'DELIVER_MESSAGE' ? 'peer.deliver' : c.kind === 'ANSWER_PEER' ? 'peer.answer' : 'peer.continue', origin, signal);
+    return true;
+  }
+  private async runPolicy(task: Task, candidate: Candidate, rule: string, sourceDecisionId: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const refs = this.store.refs(task);
+    for (const mid of candidate.messageIds ?? []) {
+      const m = this.mailbox.get(mid);
+      for (const tid of [m.fromTaskId, m.toTaskId]) refs[tid] = this.store.task(tid).version;
+    }
+    const stateArtifact = this.store.artifact(this.runId, canonical({ task: task.id, snapshot: task.snapshot,
+      authorityHash: this.authorityHash(task), proofHash: this.proofHash(task), candidate, refs }));
+    const op: Operation = { id: id('policy'), runId: this.runId, taskId: task.id, decisionId: sourceDecisionId,
+      candidate, state: 'pending', policy: { rule, refs, stateArtifact, candidateHash: hash(candidate) } };
+    this.checkPolicy(task, op);
+    if (this.store.commitPolicy(op)) {
+      this.log('runtime', `${rule} · 既存の権限内で継続（Jev呼出しなし）`, task.id);
+      await this.executeOperation(op, signal);
+    }
+  }
+  private checkPolicy(task: Task, op: Operation): void {
+    const policy = op.policy!, c = op.candidate, origin = this.store.get<Decision>('decisions', op.decisionId);
+    invariant(this.lean && origin?.runId === this.runId && origin.outcome === 'execute', 'Missing policy source decision');
+    invariant(hash(c) === policy.candidateHash, 'Runtime candidate changed');
+    const state = JSON.parse(this.store.readArtifact(policy.stateArtifact));
+    invariant(state.authorityHash === this.authorityHash(task) && state.snapshot === task.snapshot, 'Policy scope/snapshot changed');
+    // Every rule has a closed set of permitted consequences. Neither a message nor
+    // arbitrary persisted text can create an approval, shell command or new role.
+    if (policy.rule === 'task.accept-verdict') {
+      invariant(c.kind === 'ACCEPT_TASK' && origin.taskId === task.id && this.acceptable(task), 'Invalid acceptance consequence');
+      invariant(state.proofHash === this.proofHash(task), 'Acceptance evidence changed');
+      const approved = this.candidates(task, origin.answers).find(x => x.kind === 'ACCEPT_TASK');
+      invariant(approved && canonical(approved.findingResolutions) === canonical(c.findingResolutions), 'Verdict does not authorize acceptance');
+    } else if (policy.rule === 'task.final-verify') {
+      invariant(c.kind === 'REQUEST_EVIDENCE' && task.finalVerificationPending && this.singleDirectTask(task)
+        && task.acceptanceGrant?.decisionId === op.decisionId && task.snapshot === this.run.integrationHead
+        && task.acceptanceGrant.proofHash === this.proofHash(task), 'Final verification requires unchanged accepted evidence');
+    } else if (policy.rule === 'task.stage') {
+      invariant(c.kind === 'STAGE_INTEGRATION' && task.phase === 'stage' && task.status === 'accepted'
+        && task.acceptanceGrant?.decisionId === op.decisionId && task.acceptanceGrant.snapshot === task.snapshot
+        && task.acceptanceGrant.proofHash === this.proofHash(task), 'Stage requires unchanged accepted evidence');
+    } else if (policy.rule === 'task.repair') {
+      invariant(c.kind === 'REWORK_SAME_SESSION' && this.canRepair(task)
+        && task.implementationGrant?.decisionId === op.decisionId && c.profileId === task.profileId
+        && c.sessionId === task.sessionId, 'Repair exceeds its existing grant');
+    } else if (policy.rule === 'task.review') {
+      invariant(c.kind === 'REQUEST_REVIEW' && this.canRepeatReview(task)
+        && task.reviewGrant?.decisionId === op.decisionId && c.profileId === task.reviewGrant.profileId,
+        'Repeated review exceeds its existing grant');
+    } else if (policy.rule.startsWith('peer.')) {
+      const expected = { 'peer.deliver': 'DELIVER_MESSAGE', 'peer.answer': 'ANSWER_PEER', 'peer.continue': 'CONTINUE_AFTER_PEER' }[policy.rule];
+      invariant(expected && c.kind === expected && this.mailbox.enabled && c.messageIds?.length, 'Invalid communication consequence');
+      for (const mid of c.messageIds) {
+        const m = this.mailbox.get(mid); this.mailbox.assertFresh(m); this.guard.assertOutbound(m.body);
+        const from = this.store.task(m.fromTaskId), to = this.store.task(m.toTaskId);
+        invariant(from.runId === this.runId && to.runId === this.runId && from.id !== to.id, 'Invalid peer participants');
+        if (policy.rule === 'peer.deliver') invariant(m.fromTaskId === task.id && m.status === 'proposed'
+          && this.store.get<Operation>('outbox', m.invocationId)?.decisionId === op.decisionId, 'No message origin grant');
+      }
+      if (policy.rule !== 'peer.deliver') invariant(task.implementationGrant?.decisionId === op.decisionId
+        && task.implementationGrant.policyHash === this.authorityHash(task)
+        && c.profileId === task.profileId && c.sessionId === task.sessionId, 'Peer changed the assigned model/session');
+    } else throw new Error('Unknown runtime policy rule');
+  }
   private profiles(role: Role): Profile[] { return this.run.config.profiles.filter(p => p.enabled && p.roles.includes(role) && ['managed', 'trusted-local'].includes(p.level)); }
   private candidates(task: Task, checks: Record<string, unknown>): Candidate[] {
     const list: Candidate[] = [];
@@ -330,6 +500,7 @@ export class Engine extends EventEmitter {
       const a = checks[`finding_${hash(f.id).slice(0, 12)}`] as import('./types.ts').Answer | undefined;
       if (a?.kind === 'choice' && ['fixed', 'not-applicable'].includes(a.selected) && (a.confidence ?? a.probabilities[a.selected] ?? 0) >= this.run.config.thresholds.accept) resolutions[f.id] = a.selected as 'fixed' | 'not-applicable';
     }
+    for (const f of task.findings) if (f.duplicateOf && resolutions[f.duplicateOf]) resolutions[f.id] = resolutions[f.duplicateOf]!;
     const criticalResolved = task.findings.every(f => f.severity !== 'blocker' || f.status === 'fixed' || f.status === 'not-applicable' || !!resolutions[f.id]);
     const add = (kind: Candidate['kind'], reason: string, profileId?: string, specialization?: string) => {
       const c = { kind, reason, taskId: task.id, profileId, specialization, workspace: task.workspace,
@@ -362,22 +533,37 @@ export class Engine extends EventEmitter {
     } else if (task.phase === 'stage') add('STAGE_INTEGRATION', 'Integrate this accepted snapshot into the isolated run branch; never push or modify the user checkout.');
     add('ASK_USER', 'Stop at a checkpoint and ask the user to clarify missing requirements, evidence, capabilities, or budget.');
     add('PAUSE', 'Pause without accepting or discarding any work.');
-    return list;
+    return this.lean && this.run.workerStarts >= this.run.config.runtime.maxWorkerStarts ? list.filter(c => !c.profileId) : list;
   }
   private acceptable(task: Task): boolean {
     return !this.mailbox.waiting(task) && !!task.snapshot && task.testsPassed === true && task.testedSnapshot === task.snapshot && task.reviewedSnapshot === task.snapshot && task.reviewCount >= task.requiredReviews;
   }
   private async executeOperation(op: Operation, signal: AbortSignal): Promise<void> {
     invariant(this.run.status === 'running' && !signal.aborted, 'Run is not running');
-    const task = this.store.task(op.taskId), c = op.candidate;
+    let task = this.store.task(op.taskId); const c = op.candidate;
     invariant(task.activeOperation === op.id && op.state === 'pending', 'Operation is not pending for this task');
-    if (c.reason !== 'runtime.verify') {
+    if (op.policy) {
+      const expected = { ...op.policy.refs, [task.id]: op.policy.refs[task.id]! + 1 };
+      if (!this.store.fresh(this.runId, expected)) {
+        this.store.tx(() => { this.store.put('outbox', op.id, this.runId, { ...op, state: 'failed', error: 'Runtime policy preconditions changed' }); this.store.updateTask(task.id, { activeOperation: undefined }); this.store.event(this.runId, 'operation.stale', { taskId: task.id, operation: op.id }); });
+        return;
+      }
+      this.checkPolicy(task, op);
+    } else if (c.reason !== 'runtime.verify') {
       const decision = this.store.get<Decision>('decisions', op.decisionId);
       invariant(decision?.outcome === 'execute', 'Operation has no executed decision');
       const expected = { ...decision.refs, [task.id]: decision.refs[task.id]! + 1 };
       if (!this.store.fresh(this.runId, expected)) {
         this.store.tx(() => { this.store.put('outbox', op.id, this.runId, { ...op, state: 'failed', error: 'Decision preconditions changed before execution' }); this.store.updateTask(task.id, { activeOperation: undefined }); this.store.event(this.runId, 'operation.stale', { taskId: task.id, operation: op.id }); });
         return;
+      }
+    }
+    if (this.lean && task.phase === 'assess' && !task.assessments && !op.policy) {
+      const evaluated = this.store.get<Decision>('decisions', op.decisionId)!.answers;
+      const axes = Object.fromEntries(Object.keys(assessmentQuestions()).filter(k => evaluated[k]).map(k => [k, evaluated[k]!]));
+      if (Object.keys(axes).length) {
+        const risk = axes.risk;
+        task = this.store.updateTask(task.id, { assessments: axes, requiredReviews: (risk?.kind === 'score' && risk.value >= 1.3) || /auth|payment|billing|migration|認証|課金|権限|個人情報/i.test(task.spec.instruction) ? 2 : 1 });
       }
     }
     op = { ...op, state: 'running', startedAt: now() }; this.store.put('outbox', op.id, this.runId, op);
@@ -390,7 +576,21 @@ export class Engine extends EventEmitter {
       if (['DELIVER_MESSAGE', 'REJECT_MESSAGE', 'ANSWER_PEER', 'CONTINUE_AFTER_PEER'].includes(c.kind)) {
         await this.peerOperation(task, op, signal, complete); return;
       }
-      if (c.reason === 'runtime.verify') { await this.verify(task, signal, op); complete(); return; }
+      if (c.reason === 'runtime.verify') {
+        await this.verify(task, signal, op);
+        if (op.policy?.rule === 'task.final-verify') {
+          const checked = this.store.task(task.id);
+          if (checked.testsPassed) {
+            invariant(await git(this.run.integration, ['rev-parse', 'HEAD']) === task.snapshot && !(await dirty(this.run.integration)), 'Integration changed during final checks');
+            complete({ phase: 'done', status: 'done', staged: true, finalVerificationPending: false });
+            this.store.updateRun(this.runId, { status: 'ready_for_user_apply', finalSnapshot: task.snapshot,
+              inPlaceFingerprint: this.run.mode === 'in-place' ? await fingerprint(this.run.repo) : undefined });
+            this.store.event(this.runId, 'proof.reused', { taskId: task.id, snapshot: task.snapshot, sourceDecisionId: op.decisionId, rule: 'same-commit-with-fresh-runtime-tests' });
+            this.log('ready', '同一commitのレビュー・Jev判定を再利用し、最終テストを確認しました。/apply で反映できます。');
+          } else complete({ phase: 'implement', status: 'reported', staged: false, finalVerificationPending: false, acceptanceGrant: undefined });
+        } else complete();
+        return;
+      }
       if (c.kind === 'ASK_USER' || c.kind === 'PAUSE' || c.kind === 'CANCEL') {
         complete(); this.store.updateRun(this.runId, { status: c.kind === 'CANCEL' ? 'cancelled' : c.kind === 'ASK_USER' ? 'blocked' : 'paused', blockReason: c.reason });
         this.log('attention', c.kind === 'ASK_USER' ? `確認が必要です: ${task.lastReport?.questions.join(' / ') || task.lastFailure || task.spec.title}` : '実行を一時停止しました。', task.id); return;
@@ -405,7 +605,10 @@ export class Engine extends EventEmitter {
           this.store.updateRun(this.runId, { status: 'ready_for_user_apply', finalSnapshot: task.snapshot,
             inPlaceFingerprint: this.run.mode === 'in-place' ? await fingerprint(this.run.repo) : undefined });
           this.log('ready', '全体検証とJevの承認が完了しました。/diff で確認し、/apply で反映できます。');
-        } else complete({ phase: 'stage', status: 'accepted', findings: task.findings.map(f => ({ ...f, status: c.findingResolutions?.[f.id] ?? f.status })) });
+        } else {
+          const findings = task.findings.map(f => ({ ...f, status: c.findingResolutions?.[f.id] ?? f.status }));
+          complete({ phase: 'stage', status: 'accepted', findings, acceptanceGrant: this.lean ? { decisionId: op.decisionId, snapshot: task.snapshot!, proofHash: this.proofHash({ ...task, findings }) } : undefined });
+        }
         return;
       }
       if (c.kind === 'STAGE_INTEGRATION') { await this.stage(task); complete({ phase: 'done', status: 'done', staged: true }); return; }
@@ -492,6 +695,8 @@ export class Engine extends EventEmitter {
     writeFileSync(logPath, '', { mode: 0o600, flag: 'wx' }); let logged = 0, lastEvent = 0;
     this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 });
     this.store.updateTask(task.id, { status: role === 'reviewer' ? 'reviewing' : 'running', activeProfileId: profile.id, activeRole: role, lastActivity: `${profile.id}: ${role}`,
+      ...(this.lean && writer ? { implementationGrant: op.policy ? task.implementationGrant : { decisionId: op.decisionId, policyHash: this.authorityHash(task) }, acceptanceGrant: undefined } : {}),
+      ...(this.lean && role === 'reviewer' && !op.policy ? { reviewGrant: { decisionId: op.decisionId, profileId: profile.id, profileHash: hash(profile), policyHash: this.authorityHash(task) } } : {}),
       ...(writer ? { profileId: profile.id, sessionId: resume, sessionFingerprint: affinity, attempts: task.attempts + (c.kind === 'CONTINUE_AFTER_PEER' ? 0 : 1), reviewCount: 0, testsPassed: undefined, reviewedSnapshot: undefined, testedSnapshot: undefined } : {}) });
     this.log('worker.started', `${profile.id} · ${role} · ${task.spec.title}`, task.id);
     const invocation: Invocation = { id: op.id, runId: this.runId, taskId: task.id, role, profile, cwd, prompt, sessionId: resume, sessionDir, signal,
@@ -552,7 +757,7 @@ export class Engine extends EventEmitter {
           lastReport: report, phase: 'verify', status: questions.length ? 'waiting_for_peer' : 'reported', sameFailure: repeat,
           peerTurns: (task.peerTurns ?? 0) + (questions.length ? 1 : 0) });
       });
-      if (report.peerQuestions?.length) this.log('peer.waiting', '他の担当への質問を保存しました。Jevの配送判断を待っています。', task.id);
+      if (report.peerQuestions?.length) this.log('peer.waiting', '他の担当への質問を保存しました。宛先と権限を検査して配送します。', task.id);
     } else if (role === 'planner') {
       invariant(report.plan?.length, 'Planner did not submit a task graph'); validateGraph(report.plan);
       complete({ proposedPlan: report.plan, lastReport: report, phase: 'plan-review', status: 'reported', diagnoses: task.diagnoses + 1 });
@@ -578,7 +783,7 @@ export class Engine extends EventEmitter {
     invariant(task.snapshot, 'No snapshot to verify'); await this.ensureSnapshot(task);
     this.store.updateTask(task.id, { status: 'verifying' }); this.log('verify', '固定した成果物で検証コマンドを実行しています。', task.id);
     const scratch = await this.ws.create(`${task.id}_verify_${id('v')}`, task.snapshot);
-    let passed = true; const results: unknown[] = [];
+    let passed = true; let verificationFailure: Task['verificationFailure']; const results: unknown[] = [];
     for (const [kind, commands] of [['setup', this.run.trust.setup], ['test', this.run.trust.tests]] as const) {
       for (const cmd of commands) {
         signal.throwIfAborted();
@@ -589,7 +794,13 @@ export class Engine extends EventEmitter {
         const entry = { kind, argv: cmd.argv, code: result.code, timedOut: result.timedOut, interrupted: result.interrupted, snapshot: task.snapshot,
           stdout: this.guard.redact(clip(result.stdout, 20_000).text), stderr: this.guard.redact(clip(result.stderr, 20_000).text) };
         results.push(entry);
-        if (result.code !== 0 || result.timedOut || result.interrupted || result.overflow) { passed = false; break; }
+        if (result.code !== 0 || result.timedOut || result.interrupted || result.overflow) {
+          passed = false;
+          const text = result.stdout + '\n' + result.stderr;
+          const environment = kind === 'setup' || result.timedOut || result.interrupted || result.overflow || /ENOENT|Cannot find module|MODULE_NOT_FOUND|command not found|EACCES|ECONN|rate.limit|capacity|authentication/i.test(text);
+          verificationFailure = environment ? 'environment' : /AssertionError|ERR_ASSERTION|assertion failed|^not ok [0-9]|FAIL\s+.*test/im.test(text) ? 'assertion' : 'unknown';
+          break;
+        }
       }
       if (!passed) break;
     }
@@ -599,12 +810,18 @@ export class Engine extends EventEmitter {
     const encoded = canonical(results);
     this.addEvidence(task.id, 'test', task.snapshot, encoded, 'runtime', 'runtime-observed');
     const signature = hash(encoded.replace(/\b\d{4}-[^" ]+/g, 'TIME'));
-    this.store.updateTask(task.id, { testsPassed: passed, testedSnapshot: task.snapshot, phase: 'review', status: 'reported',
+    this.store.updateTask(task.id, { testsPassed: passed, testedSnapshot: task.snapshot, verificationFailure, phase: this.lean && !passed ? 'implement' : 'review', status: 'reported',
       lastFailure: passed ? undefined : `Verification failed: ${signature}\n${clip(encoded, 2500).text}`, sameFailure: !passed && task.lastFailure?.includes(signature) ? task.sameFailure + 1 : task.sameFailure });
     this.notify();
   }
   private async deduplicateFindings(taskId: string, signal: AbortSignal): Promise<void> {
     const task = this.store.task(taskId), pairs: [number, number][] = [];
+    if (this.lean) {
+      const seen = new Map<string, string>();
+      const findings = task.findings.map(f => { const key = hash({ snapshot: f.snapshot, requirement: f.requirement, evidence: f.evidence, reproduce: f.reproduce, severity: f.severity }); const first = seen.get(key); if (!first) seen.set(key, f.id); return first ? { ...f, duplicateOf: first } : f; });
+      if (canonical(findings) !== canonical(task.findings)) this.store.updateTask(taskId, { findings });
+      return;
+    }
     for (let i = 0; i < task.findings.length; i++) for (let j = i + 1; j < task.findings.length && pairs.length < 24; j++) {
       const a = task.findings[i]!, b = task.findings[j]!;
       if (a.snapshot === b.snapshot && !b.duplicateOf && a.requirement === b.requirement) pairs.push([i, j]);
@@ -622,6 +839,14 @@ export class Engine extends EventEmitter {
     if (task.kind === 'conflict') {
       this.store.updateRun(this.runId, { integrationHead: task.snapshot! }); return;
     }
+    if (this.lean && this.singleDirectTask(task) && this.run.integrationHead === task.base && task.acceptanceGrant && task.acceptanceGrant.proofHash === this.proofHash(task)) {
+      await this.ws.validate(this.run.integration);
+      invariant(!(await dirty(this.run.integration)), 'Integration is dirty');
+      invariant(await git(this.run.integration, ['rev-parse', 'HEAD']) === task.base, 'Integration baseline changed');
+      await git(this.run.integration, ['merge', '--ff-only', '--no-edit', task.snapshot!]);
+      this.store.updateRun(this.runId, { integrationHead: task.snapshot! });
+      this.log('integrated', `同一commitを統合: ${task.spec.title}`, task.id); return;
+    }
     const result = await this.ws.merge(this.run, task);
     if (result.ok) { this.store.updateRun(this.runId, { integrationHead: result.head! }); this.log('integrated', `統合済み: ${task.spec.title}`, task.id); return; }
     const conflictId = `merge-${task.spec.id}`;
@@ -634,6 +859,16 @@ export class Engine extends EventEmitter {
     const run = this.run;
     invariant(!(await dirty(run.integration)), 'Integration still has uncommitted changes');
     const snapshot = await git(run.integration, ['rev-parse', 'HEAD']);
+    const direct = this.tasks.find(t => this.singleDirectTask(t));
+    if (this.lean && direct?.acceptanceGrant && direct.staged && direct.snapshot === snapshot && this.acceptable(direct) && direct.acceptanceGrant.proofHash === this.proofHash(direct)) {
+      await this.ensureSnapshot(direct);
+      const origin = this.store.get<Decision>('decisions', direct.acceptanceGrant.decisionId);
+      invariant(origin?.outcome === 'execute', 'Missing original acceptance verdict');
+      // External test environments cannot be proven unchanged from a Git SHA.
+      // Reuse the semantic verdict/review, but run the approved final tests again.
+      this.store.updateTask(direct.id, { phase: 'verify', status: 'ready', finalVerificationPending: true });
+      return;
+    }
     const task = makeTask(run, { id: 'FINAL', title: 'Integrated acceptance review', instruction: run.goal,
       acceptance: [...new Set(this.tasks.flatMap(t => t.spec.acceptance))], dependsOn: this.tasks.map(t => t.id), readPaths: ['**'], writePaths: ['**'], resources: ['integration'] }, 'integration');
     Object.assign(task, { workspace: run.integration, base: run.base, snapshot, phase: 'verify', status: 'accepted', requiredReviews: Math.max(...this.tasks.map(t => t.requiredReviews)) });
@@ -659,7 +894,7 @@ export class Engine extends EventEmitter {
       // A user change invalidates all accepted results; preserve work and re-review it.
       for (const task of this.tasks) if (task.kind !== 'integration' && task.snapshot) {
         const partial = task.phase === 'implement' || task.workspace && await dirty(task.workspace);
-        this.store.updateTask(task.id, { phase: partial ? 'implement' : 'verify', status: 'reported', staged: false, testsPassed: undefined, testedSnapshot: undefined, reviewedSnapshot: undefined, reviewCount: 0 });
+        this.store.updateTask(task.id, { implementationGrant: undefined, reviewGrant: undefined, acceptanceGrant: undefined, finalVerificationPending: false, phase: partial ? 'implement' : 'verify', status: 'reported', staged: false, testsPassed: undefined, testedSnapshot: undefined, reviewedSnapshot: undefined, reviewCount: 0 });
       }
       const final = this.tasks.find(t => t.kind === 'integration');
       if (final) this.store.updateTask(final.id, { phase: 'verify', status: 'reported', reviewedSnapshot: undefined, reviewCount: 0, staged: false });
@@ -677,11 +912,11 @@ export class Engine extends EventEmitter {
     this.mailbox.discard('Approved configuration changed; peer messages must be re-proposed using current permissions.');
     const contextChanged = hash(trust.skills) !== hash(run.trust.skills);
     this.store.tx(() => {
-      this.store.updateRun(run.id, { config: JSON.parse(canonical(next)), trust, status: 'paused', scopeVersion: run.scopeVersion + 1, finalSnapshot: undefined, blockReason: 'Approved configuration refreshed; /resume to revalidate retained work' });
+      this.store.updateRun(run.id, { controlVersion: 'lean-v1', config: JSON.parse(canonical(next)), trust, status: 'paused', scopeVersion: run.scopeVersion + 1, finalSnapshot: undefined, blockReason: 'Approved configuration refreshed; /resume to revalidate retained work' });
       for (const task of this.tasks) {
         const before = run.config.profiles.find(p => p.id === task.profileId), after = next.profiles.find(p => p.id === task.profileId);
         const changed = contextChanged || !after?.enabled || hash(before ?? null) !== hash(after);
-        this.store.updateTask(task.id, { assessments: undefined, contextIds: contextChanged ? [] : task.contextIds,
+        this.store.updateTask(task.id, { implementationGrant: undefined, reviewGrant: undefined, acceptanceGrant: undefined, finalVerificationPending: false, verificationFailure: undefined, assessments: undefined, contextIds: contextChanged ? [] : task.contextIds,
           ...(changed ? { profileId: undefined, sessionId: undefined, sessionFingerprint: undefined, observedModel: undefined } : {}),
           ...(task.phase === 'done' && !task.snapshot ? {} : { phase: task.snapshot ? 'verify' : 'assess', status: 'reported', testsPassed: undefined, testedSnapshot: undefined, reviewedSnapshot: undefined, reviewCount: 0, staged: false }) });
       }
@@ -698,7 +933,7 @@ export class Engine extends EventEmitter {
       const task = this.store.task(op.taskId);
       if (task.workspace && task.workspace !== this.run.repo) await this.ws.validate(task.workspace);
       this.store.put('outbox', op.id, this.runId, { ...op, state: 'failed', error: 'Explicitly acknowledged uncertain side effects; next action still requires Jev' });
-      this.store.updateTask(task.id, { activeOperation: undefined, phase: op.candidate.reason === 'runtime.verify' ? 'verify' : task.snapshot ? 'judge' : task.workspace ? 'implement' : 'assess', status: 'reported', reviewedSnapshot: undefined, testsPassed: undefined, blockReason: undefined });
+      this.store.updateTask(task.id, { implementationGrant: undefined, reviewGrant: undefined, acceptanceGrant: undefined, finalVerificationPending: false, activeOperation: undefined, phase: op.candidate.reason === 'runtime.verify' ? 'verify' : task.snapshot ? 'judge' : task.workspace ? 'implement' : 'assess', status: 'reported', reviewedSnapshot: undefined, testsPassed: undefined, blockReason: undefined });
       if (op.candidate.messageIds?.length) this.mailbox.discard('Explicit recovery acknowledged uncertain delivery. Do not assume the answer was consumed.', op.candidate.messageIds.map(id => this.mailbox.get(id).threadId));
       this.resourceStore.release(task.id);
     }

@@ -143,6 +143,25 @@ export class Store {
       this.updateTask(operation.taskId, { activeOperation: operation.id }); return true;
     });
   }
+  /** A deterministic consequence of an existing grant, never a fabricated model answer. */
+  commitPolicy(operation: Operation): boolean {
+    return this.tx(() => {
+      const policy = operation.policy;
+      invariant(policy, 'Missing runtime policy authorization');
+      const origin = this.get<Decision>('decisions', operation.decisionId);
+      invariant(origin?.outcome === 'execute' && origin.runId === operation.runId,
+        'Runtime transition requires a recorded grant in the same run');
+      if (!this.fresh(operation.runId, policy.refs)) return false;
+      invariant(!this.task(operation.taskId).activeOperation, 'Task already has an operation');
+      invariant(policy.candidateHash === hash(operation.candidate), 'Runtime candidate changed');
+      this.put('outbox', operation.id, operation.runId, operation);
+      this.updateTask(operation.taskId, { activeOperation: operation.id });
+      this.event(operation.runId, 'policy.transition', { taskId: operation.taskId,
+        operation: operation.id, rule: policy.rule, sourceDecisionId: operation.decisionId,
+        action: operation.candidate.kind, stateArtifact: policy.stateArtifact });
+      return true;
+    });
+  }
   memo(key: string): { decisionId: string; evaluation: unknown } | undefined {
     const row = this.db.prepare('SELECT decision_id,data FROM memo WHERE key=?').get(key) as { decision_id: string; data: string } | undefined;
     return row ? { decisionId: row.decision_id, evaluation: JSON.parse(row.data) } : undefined;

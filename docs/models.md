@@ -1,11 +1,11 @@
-# CLI別の許可モデル一覧（0.2.0）
+# CLI別の許可モデル一覧（0.3.0）
 
 利用者が選ぶのは **使用を許可するCLIと、そのCLIが公開するモデルの集合** です。fast / standard / deep / reviewの用途入力は不要です。Jevがタスクの難易度と根拠から、許可済みモデルと作業の役割を組にして選びます。
 
 ```sh
 brew update
 brew upgrade moto-taka/jev-orchestrator/jvo
-jvo --version  # 0.2.0
+jvo --version  # 0.3.0
 jvo models     # Jevキーは再入力不要
 ```
 
@@ -46,3 +46,5 @@ Claudeの `opusplan` は、Jev以外が役割によってモデルを切り替�
 - [Pi RPC](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)
 - [Pi list-models](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/cli/list-models.ts)
 - [OpenCode CLI models](https://opencode.ai/docs/cli/#models)
+
+0.3.0ではモデル候補同士の拮抗を、作業を止めるべき不確実性と区別します。行動とモデルの質問を独立して評価し、人間が役割を固定する方式には戻していません。[詳細](lean-decisions.md)

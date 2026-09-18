@@ -16,7 +16,8 @@ test('end-to-end: measured failure -> same-session/cwd rework -> independent rev
     assert.equal(await fingerprint(engine.run.repo), before, 'Original checkout was changed before /apply');
     const writers = adapter.invocations.filter(i => i.role === 'implementer'); assert.equal(writers.length, 2); assert.equal(writers[0]!.cwd, writers[1]!.cwd); assert(writers[1]!.session);
     assert(writers[1]!.prompt.startsWith('Continue task')); assert(!writers[0]!.session);
-    const decisions = store.all<Decision>('decisions', engine.runId); assert(decisions.some(d => d.selected?.kind === 'REWORK_SAME_SESSION'));
+    const decisions = store.all<Decision>('decisions', engine.runId); assert(store.all<Operation>('outbox', engine.runId).some(o => o.candidate.kind === 'REWORK_SAME_SESSION' && o.policy?.rule === 'task.repair'));
+    assert(!decisions.some(d => d.selected?.kind === 'REWORK_SAME_SESSION'), 'Mechanical repair must not call Jev');
     assert(decisions.filter(d => d.selected?.kind === 'ACCEPT_TASK').every(d => d.outcome === 'execute'));
     assert(store.all<Operation>('outbox', engine.runId).every(o => o.state === 'done'));
     assert(store.verifyJournal(engine.runId));
@@ -61,7 +62,7 @@ test('user cancellation aborts active workers and preserves changes without auto
 });
 test('Jev request budget is reserved before each request', async () => {
   const f = await createDemo(); const config = f.engine.run.config; config.runtime.maxDecisions = 1; f.store.updateRun(f.engine.runId, { config });
-  try { await f.engine.drive(); assert.equal(f.engine.run.decisionCalls, 1); assert.equal(f.engine.run.workerStarts, 0); assert.match(f.engine.run.blockReason!, /budget/); } finally { f.store.close(); }
+  try { await f.engine.drive(); assert.equal(f.engine.run.decisionCalls, 1); assert.equal(f.engine.run.workerStarts, 2, 'Only the already-granted implementation and bounded repair may execute'); assert.match(f.engine.run.blockReason!, /budget/); } finally { f.store.close(); }
 });
 test('security-sensitive request requires two independent reviews at task and integration gates', async () => {
   const f = await createDemo(), t = f.engine.tasks[0]!; f.store.updateTask(t.id, { spec: { ...t.spec, instruction: 'Fix authentication-adjacent addition function, keep behavior correct.' } });

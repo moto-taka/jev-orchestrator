@@ -1,0 +1,8 @@
+[
+  {"id":"progress-1","kind":"progress","taskId":"API","text":"ファイルを編集中です。次にテストします。"},
+  {"id":"progress-2","kind":"progress","taskId":"UI","text":"入力を受け付けました。"},
+  {"id":"question-1","kind":"question","taskId":"UI","text":"A案とB案のどちらを採用しますか？"},
+  {"id":"blocked-1","kind":"blocked","taskId":"API","text":"検証コマンドが失敗しました。"},
+  {"id":"completed-1","kind":"completed","taskId":"TEST","text":"確認が完了しました。"},
+  {"id":"scope-1","kind":"scope-change","taskId":"API","text":"依頼にない仕様変更が必要です。"}
+]

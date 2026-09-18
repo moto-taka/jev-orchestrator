@@ -1,3 +1,14 @@
+# 0.3.0での変更
+
+- `src/engine.ts` / `storage.ts` / `types.ts`: 実Jev判断を元にした限定的なruntime継続権限、A2A配送、修正、レビュー担当維持、合格後統合。旧runの動作は明示更新まで保持。
+- `src/decision/questions.ts`: 行動とモデル適性の独立質問、初回評価の集約、合否の重複確認廃止。
+- `src/report-triage.ts` / `triage-command.ts`: 任意の報告仕分け、通常報告の保存、保守的な注意対象選別、許可モデルへのまとめた助言依頼。常駐司令塔は追加しない。
+- `test/lean.test.ts` / `triage.test.ts`: 回数の経路比較、モデルの拮抗、古い権限、最終試験の環境変化、通常/重要/秘匿報告の区別。
+
+詳しくは[判断削減](lean-decisions.md)と[報告仕分け](report-triage.md)。以下は原設計への過去の対応記録です。0.2.0の配送ごとのJev承認は、新規runでは通常コードへ移しています。
+
+---
+
 # 0.2.0での拡張
 
 - `src/models/catalog.ts` / `picker.ts` / `setup.ts`: CLI別モデル一覧・複数許可。tier入力なし、Jevがモデルと役割を選択。詳しくは[モデル設定](models.md)。

@@ -8,6 +8,7 @@ import { Engine, startRun } from './engine.ts';
 import { repository } from './workspaces.ts';
 import { terminalApp } from './tui/app.ts';
 import { launchSupervisor, supervise, owner, type Client } from './ipc.ts';
+import { triageCommand } from './triage-command.ts';
 import { demo } from './demo.ts';
 import { invariant, errorText } from './util.ts';
 import { SecretGuard, sanitize } from './security.ts';
@@ -34,6 +35,9 @@ export const HELP = `jvo · Jev Orchestrator
   jvo metrics [run-id]           保存済みrunの使用量・再開率を出力（読取専用）
   jvo export-eval [run-id]       保存済みの判断入力を評価用に出力（読取専用）
   jvo eval dataset.json --allow-api   操作なしのJev比較評価（API課金あり）
+  jvo triage reports.json        報告の仕分け（既定はルールのみ・APIなし）
+    --allow-api                  曖昧な報告だけJevでまとめて分類
+    --operator=profile --allow-worker  重要報告だけ許可モデルへまとめて相談
   jvo demo [--json]              課金なし・分離したGit上でデモ
 
   --refresh-policy              resume時に明示承認済みの設定を読み直す
@@ -64,7 +68,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === '__supervise') { invariant(args[1] && args[2], 'Missing supervisor arguments'); await supervise(args[1], args[2]); return; }
   const f = flags(args), command = f.positional[0];
   if (f.flags.has('help') || command === 'help' || command === '-h') { console.log(HELP); return; }
-  if (f.flags.has('version') || command === '-v') { console.log('0.2.0'); return; }
+  if (f.flags.has('version') || command === '-v') { console.log('0.3.0'); return; }
   if (command === 'demo') { await demo(f.flags.has('json') || !process.stdin.isTTY); return; }
   // Replay opens only an existing database in read-only mode. It never runs Git,
   // loads a provider key, creates directories, starts a supervisor, or executes a worker.
@@ -81,7 +85,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if (command === 'messages') { console.log(JSON.stringify(store.hasTable('messages') ? store.all('messages', run.id) : [], null, 2)); }
       else if (command === 'metrics') {
         const attempts = store.all<{ invocation: { role: string; resume?: string; cwd: string } }>('attempts', run.id), workers = attempts.filter(a => a.invocation.role === 'implementer');
-        console.log(JSON.stringify({ runId: run.id, status: run.status, activeMilliseconds: run.activeMs ?? 0, usage: summarizeUsage(store.all<Usage>('usage', run.id)), acceptedTasks: store.all<Task>('tasks', run.id).filter(t => t.kind === 'work' && t.staged && t.snapshot).length, implementationStarts: workers.length, resumedStarts: workers.filter(a => a.invocation.resume).length, decisionCalls: run.decisionCalls, workerStarts: run.workerStarts, independentlyValidatedQuality: null, note: 'Only observed usage is totaled. A ready run is not independent proof of correctness. Include failed runs when comparing aggregate cost.' }, null, 2));
+        console.log(JSON.stringify({ runId: run.id, status: run.status, activeMilliseconds: run.activeMs ?? 0, usage: summarizeUsage(store.all<Usage>('usage', run.id)), runtimeTransitions: store.all<import('./types.ts').Operation>('outbox', run.id).filter(o => o.policy).length, reusedVerdicts: store.events(run.id, 100000).filter(e => e.kind === 'proof.reused').length, acceptedTasks: store.all<Task>('tasks', run.id).filter(t => t.kind === 'work' && t.staged && t.snapshot).length, implementationStarts: workers.length, resumedStarts: workers.filter(a => a.invocation.resume).length, decisionCalls: run.decisionCalls, workerStarts: run.workerStarts, independentlyValidatedQuality: null, note: 'Only observed usage is totaled. A ready run is not independent proof of correctness. Include failed runs when comparing aggregate cost.' }, null, 2));
       } else if (command === 'export-eval') {
         console.log(JSON.stringify({ sourceRun: run.id, note: 'Add independently reviewed expected labels; exporting does not send any data or call an API.', cases: decisions.filter(d => d.questionArtifact).map(d => ({ id: d.id, state: JSON.parse(store.readArtifact(d.semanticHash)) as Json, questions: JSON.parse(store.readArtifact(d.questionArtifact!)) as Record<string, Question>, labels: {} })) }, null, 2));
       } else console.log(JSON.stringify({ run: run.id, status: run.status, journalValid: store.verifyJournal(run.id), decisions, events: store.events(run.id, 100_000) }, null, 2));
@@ -89,6 +93,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
   let config = loadConfig();
+  if (command === 'triage') { invariant(f.positional[1], 'Supply reports.json'); console.log(JSON.stringify(await triageCommand(f.positional[1], config, { allowApi: f.flags.has('allow-api'), allowWorker: f.flags.has('allow-worker'), operator: f.values.operator }), null, 2)); return; }
   if (command === 'setup') { if (f.flags.has('models')) await setupModels(config); else await setup(config); return; }
   if (command === 'models') { if (f.flags.has('json')) console.log(JSON.stringify(config.profiles, null, 2)); else await setupModels(config); return; }
   if (command === 'config') { console.log(configPath()); return; }

@@ -20,7 +20,10 @@ class PeerProvider extends DemoProvider {
    const action = s.task.id==='T1'&&s.phase==='assess'?'REQUEST_PLAN': ['DELIVER_MESSAGE','ANSWER_PEER','CONTINUE_AFTER_PEER'].find(k=>cs.some(c=>c.kind===k));
    let chosen=cs.find(c=>c.kind===action);
    if(!chosen) { const a=r.answers.action; if(a?.kind==='choice') chosen=cs.find(c=>c.id===a.selected); }
-   if(chosen?.profileId) chosen=cs.find(c=>c.kind===chosen!.kind && c.profileId===(s.task.id.endsWith('-B')?'claude-pool':'codex-pool'))??chosen;
+   if(chosen?.profileId) {
+    const key='model_'+chosen.kind, q=questions[key];
+    if(q?.type==='choice') { const selected=s.task.id.endsWith('-B')?'claude-pool':'codex-pool'; r.answers[key]={kind:'choice',selected,confidence:1,probabilities:Object.fromEntries(Object.keys(q.criteria).map(id=>[id,id===selected?1:0]))}; }
+   }
    if(chosen) r.answers.action={kind:'choice',selected:chosen.id,probabilities:Object.fromEntries(cs.map(c=>[c.id,c.id===chosen!.id?1:0])),confidence:1};
   }
   return r;
@@ -46,7 +49,8 @@ for(const parallel of [1,3]) test(`native codex/claude protocol peers ask each o
    const attempts=f.store.all<any>('attempts',f.engine.runId).filter(a=>a.invocation.taskId===t.id&&a.invocation.role==='implementer');assert.equal(attempts.length,2);
    assert.equal(attempts[1].invocation.resume,attempts[0].result.sessionId);assert.equal(attempts[1].invocation.cwd,attempts[0].invocation.cwd);assert.equal(attempts[1].invocation.profileId,attempts[0].invocation.profileId);
   }
-  const ds=f.store.all<Decision>('decisions',f.engine.runId).filter(d=>d.selected?.kind==='DELIVER_MESSAGE');assert.equal(ds.length,4,'Jev must explicitly route each question AND reply');
+  const ds=f.store.all<Decision>('decisions',f.engine.runId).filter(d=>d.selected?.kind==='DELIVER_MESSAGE');assert.equal(ds.length,0,'Routine questions and replies must not call Jev');
+  assert.equal(f.store.all<Operation>('outbox',f.engine.runId).filter(o=>o.policy?.rule==='peer.deliver').length,4);
   assert.equal(readFileSync(join(f.engine.run.integration,'a.cjs'),'utf8'),'module.exports = 1;\n');assert.equal(readFileSync(join(f.engine.run.integration,'b.cjs'),'utf8'),'module.exports = 2;\n');
   assert(f.store.verifyJournal(f.engine.runId));
   const screen=renderScreen(f.engine.view(),{input:'',cursor:0,panel:'/messages',scroll:0},120,40).lines.join('\n');assert(screen.includes('質問')&&screen.includes('返答'));
@@ -91,8 +95,9 @@ test('read-only answering cannot modify its peer worktree or create an admissibl
   await engine.recover(true);assert(!engine.mailbox.all().some(m=>m.status==='unknown'),'Explicit recovery must retire uncertain deliveries, not resend them');
  }finally{f.store.close();}
 });
-test('rejected message does not deliver or grant task completion', {timeout:20000},async()=>{
+test('legacy strict run retains its originally approved delivery policy', {timeout:20000},async()=>{
  const f=await fixture(1);try{
+  f.store.updateRun(f.engine.runId,{controlVersion:undefined});
   const delegate=new PeerProvider();const provider={identity:'reject-peer-fixture',evaluate:async(s:Json,qs:Record<string,Question>)=>{const result=await delegate.evaluate(s,qs);const cs=(s as any).candidates as Candidate[]|undefined;const reject=cs?.find(c=>c.kind==='REJECT_MESSAGE');if(reject)result.answers.action={kind:'choice',selected:reject.id,confidence:1,probabilities:Object.fromEntries(cs!.map(c=>[c.id,c.id===reject.id?1:0]))};return result;}};
   const engine=new Engine(f.store,f.engine.runId,provider,{adapter:new NativeAdapter()});await engine.drive();assert.equal(engine.run.status,'blocked');assert.match(engine.run.blockReason??'',/rejected/);assert(engine.mailbox.all().every(m=>m.status==='rejected'));assert(!engine.tasks.filter(t=>t.spec.id!=='T1').some(t=>t.staged));
  }finally{f.store.close();}

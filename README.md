@@ -1,5 +1,19 @@
 # Jev Orchestrator
 
+## 0.3.0: 決まった処理ではJevを呼びません
+
+Jevは方針・モデル・役割・例外・合否を判断します。通常のA2A配送、同じ担当への返答、限定した修正、合格後の統合は、承認済み範囲内でコードが進めます。チェックや独立レビューをなくす変更ではありません。通常コードの記録はJevの実判断と区別します。
+
+```sh
+brew update
+brew upgrade moto-taka/jev-orchestrator/jvo
+jvo --version # 0.3.0
+```
+
+新規runは新制御です。既存runを切り替える場合だけ、TUIで `/pause` → `/exit` 後に `jvo resume <run-id> --refresh-policy` を実行してください。APIキーや許可モデルを再入力する必要はありません。[判断削減・安全条件](docs/lean-decisions.md)
+
+任意の `jvo triage reports.json` も追加しました。保存した報告を仕分け、`--allow-api` を指定した場合だけ曖昧なものをJevへまとめて問い合わせます。`--operator=<許可済みprofile-id> --allow-worker` で注意対象だけをモデルへまとめて相談できます。通常のjvoに別の常駐司令塔は追加しません。[報告の仕分け](docs/report-triage.md)
+
 **Jev decides. Your CLIs build.**
 
 `jvo` は、Jevを**判断専用**の仲介役として、インストール済みの **Codex / Claude Code / Pi / OpenCode** を連携するローカルオーケストレーターです。OpenClaudeを参考にした会話中心のTUIで、エージェントの進捗、差分、判断記録、使用量を確認できます。
@@ -27,7 +41,7 @@ jvo setup
 
 Node.js 24はHomebrewが依存として用意します。既存CLIの認証は変更しません。固定commitからビルドし、インストール時にはJev APIへ接続しません。[更新・認証・検証範囲](docs/homebrew.md)
 
-初回のHomebrew対応はmacOS上で `brew tap`・`brew install`・`brew test` を検証済みです（[0.1.0の検証run](https://github.com/moto-taka/jev-orchestrator/actions/runs/35309383943)）。0.2.0の結果はリポジトリのActionsを確認してください。CIでは認証済みcheckoutのローカルGitミラーを使い、利用者のSSH認証そのものや実Jev APIは試験しません。
+初回のHomebrew対応はmacOS上で `brew tap`・`brew install`・`brew test` を検証済みです（[0.1.0の検証run](https://github.com/moto-taka/jev-orchestrator/actions/runs/35309383943)）。各リリースの結果はリポジトリのActionsを確認してください。CIでは認証済みcheckoutのローカルGitミラーを使い、利用者のSSH認証そのものや実Jev APIは試験しません。
 
 ### ソース / npm経由
 
@@ -66,7 +80,7 @@ jvo demo --json
 ```sh
 brew update
 brew upgrade moto-taka/jev-orchestrator/jvo
-jvo --version   # 0.2.0
+jvo --version   # 0.3.0
 jvo models      # APIキーを再入力せず、モデルの許可だけ変更
 ```
 
@@ -74,7 +88,7 @@ Piの同一モデル名でもproviderごとに別項目として保持し、既�
 
 ## jvo自身のエージェント間通信
 
-0.2.0では、**agmsg・Orca・Herdrを使わず**、jvo内部で異なる担当の質問と返答を交換します。各workerが文章を書き、Jevが宛先・配送・回答モデル・続行を判断します。質問元のモデル/session/worktreeを保って返答だけを追加します。
+**agmsg・Orca・Herdrを使わず**、jvo内部で異なる担当の質問と返答を交換します。各workerが文章を書き、通常の配送・担当済み相手の回答・元sessionへの続行はjvoのコードが行います。未割当の相手のモデル選択や例外はJevが判断します。質問元のモデル/session/worktreeを保って返答だけを追加します。
 
 会話は同じrunの作業タスク間で、ターンの区切りに配送します。任意の外部端末への入力注入や、標準A2A ProtocolのネットワークAPIではありません。会話だけで合格にはならず、通常のテスト・独立レビュー・Jev承認を通します。`/messages` で配送状態と本文を確認できます。[内蔵通信の仕様・検証範囲](docs/agent-messaging.md)
 

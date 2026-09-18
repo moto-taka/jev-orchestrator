@@ -100,6 +100,11 @@ export interface Evidence {
   trust: 'runtime-observed' | 'worker-claimed' | 'user-specified'; truncated: boolean;
 }
 export interface Task {
+  implementationGrant?: { decisionId: string; policyHash: string };
+  reviewGrant?: { decisionId: string; profileId: string; profileHash: string; policyHash: string };
+  acceptanceGrant?: { decisionId: string; snapshot: string; proofHash: string };
+  finalVerificationPending?: boolean;
+  verificationFailure?: 'assertion' | 'environment' | 'unknown';
   peerTurns?: number;
   id: string; runId: string; spec: TaskSpec; version: number;
   phase: Phase; status: TaskStatus; kind: 'work' | 'conflict' | 'integration';
@@ -114,6 +119,7 @@ export interface Task {
   blockReason?: string; contextIds: string[];
 }
 export interface Run {
+  controlVersion?: 'lean-v1';
   id: string; repo: string; repoId: string; goal: string; scopeVersion: number;
   createdAt: string; updatedAt: string;
   status: 'running' | 'paused' | 'blocked' | 'ready_for_user_apply' | 'applied' | 'cancelled';
@@ -143,6 +149,7 @@ export interface Decision {
   evidenceIds: string[]; sourceDecisionId?: string; createdAt: string;
 }
 export interface Operation {
+  policy?: { rule: string; refs: Record<string, number>; stateArtifact: string; candidateHash: string };
   id: string; runId: string; taskId: string; decisionId: string; candidate: Candidate;
   state: 'pending' | 'running' | 'done' | 'unknown' | 'failed';
   startedAt?: string; pid?: number; birth?: string; receipt?: string; error?: string;
@@ -164,6 +171,7 @@ export interface AgentResult {
 }
 export interface AgentAdapter { run(invocation: Invocation): Promise<AgentResult>; }
 export interface View {
+  runtimeTransitions?: { rule: string; action: ActionKind; sourceDecisionId: string; state: Operation['state'] }[];
   messages?: PeerMessage[];
   run?: Run; tasks: Task[];
   events: { time: string; kind: string; text: string; taskId?: string }[];

@@ -22,7 +22,7 @@ export class DemoProvider implements DecisionProvider {
       else {
         const cs = (context.candidates ?? []) as Candidate[];
         const order = ['ACCEPT_TASK', 'STAGE_INTEGRATION', 'REWORK_SAME_SESSION', 'START_TASK', 'REQUEST_REVIEW', 'ACCEPT_PLAN', 'ASK_USER'];
-        const selected = key.startsWith('finding_') ? (context.testsPassed === true ? 'fixed' : 'open') : order.map(kind => cs.find(c => c.kind === kind)).find(Boolean)?.id ?? Object.keys(q.criteria)[0]!;
+        const selected = key.startsWith('model_') ? Object.keys(q.criteria)[0]! : key.startsWith('finding_') ? (context.testsPassed === true ? 'fixed' : 'open') : order.map(kind => cs.find(c => c.kind === kind)).find(Boolean)?.id ?? Object.keys(q.criteria)[0]!;
         answers[key] = { kind: 'choice', selected, probabilities: Object.fromEntries(Object.keys(q.criteria).map(k => [k, k === selected ? 1 : 0])), confidence: 1 };
       }
     }

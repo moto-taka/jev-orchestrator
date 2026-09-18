@@ -34,7 +34,7 @@ const number = (v?: number) => v === undefined ? '不明' : new Intl.NumberForma
 export function renderScreen(view: View | undefined, state: ScreenState, columns: number, rows: number): { lines: string[]; cursor: { row: number; column: number } } {
   const width = Math.max(20, columns - 2), height = Math.max(8, rows), run = view?.run;
   const lines: string[] = [];
-  lines.push(`  ▐▛██▜▌  jvo  0.2.0${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
+  lines.push(`  ▐▛██▜▌  jvo  0.3.0${state.demo ? '  [DEMO · API呼び出しなし]' : ''}`);
   lines.push(`  ▝▜██▛▘  ${run ? basename(run.repo) : 'Jev Orchestrator'}  ·  ${run ? state.demo ? 'DEMO fixture / 本番API未使用' : `${run.config.decision.provider} / ${run.config.decision.model}` : '判断はJev、作業はお使いのCLIへ。'}`);
   lines.push(`    ▘▘    ${run ? `${labels[run.status] ?? run.status}  ·  ${run.id.slice(0, 16)}` : 'タスクを入力してください。 /help で操作を確認できます。'}`);
   lines.push('');
@@ -56,9 +56,10 @@ export function renderScreen(view: View | undefined, state: ScreenState, columns
         for (const [k, a] of Object.entries(d.answers)) content.push(`     ${k}: ${a.kind === 'boolean' ? `true確率=${a.probability.toFixed(3)}` : a.kind === 'score' ? `${a.value.toFixed(2)} / ${a.levels.length - 1}` : `${a.selected} · confidence=${a.confidence?.toFixed(3) ?? '不明'}`}`);
         content.push(`     根拠 ${d.evidenceIds.length}件 · ${d.semanticHash.slice(0, 12)} · ${d.provider}`);
       }
+      for (const t of view?.runtimeTransitions?.slice(-12) ?? []) content.push(`  runtime · ${t.rule} · ${t.state} · 元判断 ${t.sourceDecisionId}`);
       content.push('', '  confidenceは正解率ではありません。記録された選択と根拠を表示しています。');
     } else if (state.panel === '/messages') {
-      const states: Record<string, string> = { proposed: 'Jev判断待ち', queued: '配送待ち', submitted: '入力済み・完了未確認', answered: '返答を保存', closed: '応答・継続済み', rejected: '配送拒否', unknown: '配送状態不明' };
+      const states: Record<string, string> = { proposed: run?.controlVersion === 'lean-v1' ? '宛先・権限確認待ち' : 'Jev判断待ち', queued: '配送待ち', submitted: '入力済み・完了未確認', answered: '返答を保存', closed: '応答・継続済み', rejected: '配送拒否', unknown: '配送状態不明' };
       for (const m of view?.messages ?? []) {
         const name = (id: string) => view?.tasks.find(t => t.id === id)?.spec.id ?? id;
         content.push(`  ${name(m.fromTaskId)} → ${name(m.toTaskId)} · ${m.kind === 'question' ? '質問' : '返答'} · ${states[m.status]}`);
