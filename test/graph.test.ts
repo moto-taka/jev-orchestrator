@@ -47,7 +47,19 @@ async function scenario(conflict: boolean) {
 }
 test('Jev accepts a plan, independent tasks actually overlap, and only integrated results pass the final gate', { timeout: 20_000 }, async () => {
   const f = await scenario(false);
-  try { await f.engine.drive(); assert.equal(f.engine.run.status, 'ready_for_user_apply', f.engine.run.blockReason); assert(f.adapter.maximum >= 2, 'Independent workers did not overlap'); assert.equal(f.engine.tasks.length, 4); assert.equal(readFileSync(join(f.engine.run.integration, 'a.cjs'), 'utf8'), 'module.exports = 1;\n'); assert.equal(readFileSync(join(f.engine.run.integration, 'b.cjs'), 'utf8'), 'module.exports = 2;\n'); }
+  try {
+    await f.engine.drive(); assert.equal(f.engine.run.status, 'ready_for_user_apply', f.engine.run.blockReason);
+    assert(f.adapter.maximum >= 2, 'Independent workers did not overlap'); assert.equal(f.engine.tasks.length, 4);
+    const parent = f.engine.tasks.find(t => t.spec.id === 'T1')!;
+    const plannerEvidence = parent.evidence.find(e => e.kind === 'observation');
+    assert(plannerEvidence, 'Planner report should be retained as handoff evidence');
+    for (const id of ['T1-A','T1-B']) {
+      const child = f.engine.tasks.find(t => t.spec.id === id)!;
+      assert(child.evidence.some(e => e.sourceHash === plannerEvidence.sourceHash), 'Child task must inherit planner evidence for recipient-specific handoff');
+    }
+    assert.equal(readFileSync(join(f.engine.run.integration, 'a.cjs'), 'utf8'), 'module.exports = 1;\n');
+    assert.equal(readFileSync(join(f.engine.run.integration, 'b.cjs'), 'utf8'), 'module.exports = 2;\n');
+  }
   finally { f.store.close(); }
 });
 test('parallel edits that conflict become a dedicated repair task with fresh tests and reviews', { timeout: 25_000 }, async () => {
