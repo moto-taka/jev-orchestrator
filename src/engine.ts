@@ -500,7 +500,8 @@ export class Engine extends EventEmitter {
     return !!grant && !!profile && task.phase === 'review' && task.testsPassed === true
       && task.testedSnapshot === task.snapshot && task.reviewCount < task.requiredReviews
       && this.run.workerStarts < this.run.config.runtime.maxWorkerStarts
-      && grant.policyHash === this.authorityHash(task) && grant.profileHash === hash(profile);
+      && grant.policyHash === this.authorityHash(task) && grant.profileHash === hash(profile)
+      && this.profileEfforts(profile).includes(grant.effort ?? 'default');
   }
   private async runMechanicalPeer(task: Task, candidates: Candidate[], signal: AbortSignal): Promise<boolean> {
     const c = candidates.find(c => c.kind === 'DELIVER_MESSAGE' || c.kind === 'CONTINUE_AFTER_PEER'
@@ -554,10 +555,10 @@ export class Engine extends EventEmitter {
     } else if (policy.rule === 'task.repair') {
       invariant(c.kind === 'REWORK_SAME_SESSION' && this.canRepair(task)
         && task.implementationGrant?.decisionId === op.decisionId && c.profileId === task.profileId
-        && c.sessionId === task.sessionId, 'Repair exceeds its existing grant');
+        && c.sessionId === task.sessionId && c.effort === task.effort, 'Repair exceeds its existing grant');
     } else if (policy.rule === 'task.review') {
       invariant(c.kind === 'REQUEST_REVIEW' && this.canRepeatReview(task)
-        && task.reviewGrant?.decisionId === op.decisionId && c.profileId === task.reviewGrant.profileId,
+        && task.reviewGrant?.decisionId === op.decisionId && c.profileId === task.reviewGrant.profileId && c.effort === task.reviewGrant.effort,
         'Repeated review exceeds its existing grant');
     } else if (policy.rule.startsWith('peer.')) {
       const expected = { 'peer.deliver': 'DELIVER_MESSAGE', 'peer.answer': 'ANSWER_PEER', 'peer.continue': 'CONTINUE_AFTER_PEER' }[policy.rule];
@@ -571,7 +572,7 @@ export class Engine extends EventEmitter {
       }
       if (policy.rule !== 'peer.deliver') invariant(task.implementationGrant?.decisionId === op.decisionId
         && task.implementationGrant.policyHash === this.authorityHash(task)
-        && c.profileId === task.profileId && c.sessionId === task.sessionId, 'Peer changed the assigned model/session');
+        && c.profileId === task.profileId && c.sessionId === task.sessionId && c.effort === task.effort, 'Peer changed the assigned model/session/effort');
     } else throw new Error('Unknown runtime policy rule');
   }
   private profiles(role: Role): Profile[] { return this.run.config.profiles.filter(p => p.enabled && p.roles.includes(role) && ['managed', 'trusted-local'].includes(p.level)); }
