@@ -436,7 +436,7 @@ export class Engine extends EventEmitter {
     return ['default'];
   }
   private runtimeProfile(profile: Profile, effort?: string): Profile {
-    const allowed = this.profileEfforts(profile), selected = effort ?? (allowed.length === 1 ? (allowed[0] ?? 'default') : 'default');
+    const allowed = this.profileEfforts(profile), selected = effort ?? allowed[0] ?? 'default';
     invariant(allowed.includes(selected), 'Selected effort is outside the model-supported effort pool');
     return { ...profile, thinking: selected === 'default' ? undefined : selected };
   }
