@@ -8,7 +8,7 @@ export interface Actions {
 }
 export async function terminalApp(actions: Actions, initial?: View, options: { demo?: boolean; subscribe?: (listener: (v: View) => void) => void } = {}): Promise<void> {
   if (!stdin.isTTY || !stdout.isTTY) throw new Error('Interactive mode needs a TTY. Use jvo run "task" --json, jvo replay, or jvo demo --json.');
-  let view = initial, state: ScreenState = { input: '', cursor: 0, panel: '', scroll: 0, demo: options.demo, agentIndex: 0, agentFocus: false };
+  let view = initial, state: ScreenState = { input: '', cursor: 0, panel: '', scroll: 0, demo: options.demo, agentIndex: 0, agentSelected: false, agentFocus: false };
   const history: string[] = []; let historyIndex = 0, busy = false, finished = false, redrawTimer: NodeJS.Timeout | undefined, previous: string[] = [];
   let escapeBuffer = '', paste = false, pasteText = '';
   let escapeTimer: NodeJS.Timeout | undefined;
@@ -16,7 +16,7 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
   const redraw = () => {
     redrawTimer = undefined; if (finished) return;
     const cards = agentCards(view);
-    if (!cards.length) { state.agentIndex = 0; state.agentFocus = false; }
+    if (!cards.length) { state.agentIndex = 0; state.agentSelected = false; state.agentFocus = false; }
     else state.agentIndex = Math.max(0, Math.min(state.agentIndex ?? 0, cards.length - 1));
     const screen = renderScreen(view, state, stdout.columns || 100, stdout.rows || 30);
     let output = '\x1b[?2026h\x1b[?25l';
@@ -37,11 +37,11 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
   const quit = () => { finished = true; resolveDone!(); };
   const insert = (text: string) => {
     const chars = graphemes(state.input), added = graphemes(text); if (chars.length + added.length > 30_000) { state.notice = '入力は30,000文字以内にしてください。'; return; }
-    chars.splice(state.cursor, 0, ...added); state.input = chars.join(''); state.cursor += added.length;
+    chars.splice(state.cursor, 0, ...added); state.input = chars.join(''); state.cursor += added.length; state.agentSelected = false;
   };
   const act = async () => {
     const text = state.input.trim(); if (!text || busy) return;
-    state.input = ''; state.cursor = 0; state.scroll = 0; state.notice = undefined;
+    state.input = ''; state.cursor = 0; state.scroll = 0; state.notice = undefined; state.agentSelected = false;
     history.push(text); historyIndex = history.length; busy = true;
     try {
       state.agentFocus = false;
@@ -59,13 +59,22 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
     finally { busy = false; requestRender(); }
   };
   const key = (s: string) => {
+    const cards = agentCards(view);
+    const selectAgent = (delta: number) => {
+      if (!cards.length) return;
+      if (!state.agentSelected) state.agentIndex = delta < 0 ? cards.length - 1 : 0;
+      else state.agentIndex = (Math.max(0, state.agentIndex ?? 0) + delta + cards.length) % cards.length;
+      state.agentSelected = true; state.scroll = 0; state.notice = undefined;
+    };
     if (s === '\x03') {
       if (state.input) { state.input = ''; state.cursor = 0; }
       else { void actions.command('/pause', '').then(r => { view = r.view ?? view; state.notice = '停止しました。Ctrl+Dで終了できます。'; requestRender(); }).catch(e => { state.notice = errorText(e); requestRender(); }); }
     } else if (s === '\x04') { void actions.command('/exit', '').then(quit, e => { state.notice = errorText(e); quit(); }); }
-    else if (s === '\r' || s === '\n') {
-      const cards = agentCards(view);
-      if (!state.input.trim() && !state.panel && cards.length) { state.agentFocus = true; state.scroll = 0; }
+    else if (s === '\x1b[13;2u' || s === '\x1b[27;2;13~' || s === '\n') {
+      if (!state.agentFocus) insert('\n');
+    }
+    else if (s === '\r') {
+      if (!state.input.trim() && !state.panel && state.agentSelected && cards.length) { state.agentFocus = true; state.scroll = 0; }
       else if (!state.agentFocus) void act();
     }
     else if (s === '\x7f' || s === '\b') { const chars = graphemes(state.input); if (state.cursor > 0) { chars.splice(--state.cursor, 1); state.input = chars.join(''); } }
@@ -77,28 +86,24 @@ export async function terminalApp(actions: Actions, initial?: View, options: { d
     else if (s === '\x15') { state.input = graphemes(state.input).slice(state.cursor).join(''); state.cursor = 0; }
     else if (s === '\x0b') state.input = graphemes(state.input).slice(0, state.cursor).join('');
     else if (s === '\x1b[A' || s === '\x1b[B') {
-      const cards = agentCards(view);
-      if (state.agentFocus && !state.input && cards.length) {
-        const delta = s.endsWith('A') ? -1 : 1;
-        state.agentIndex = (Math.max(0, state.agentIndex ?? 0) + delta + cards.length) % cards.length;
-        state.scroll = 0;
+      if ((state.agentFocus || (!state.input && !state.panel)) && cards.length) {
+        selectAgent(s.endsWith('A') ? -1 : 1);
       } else {
         historyIndex = Math.max(0, Math.min(history.length, historyIndex + (s.endsWith('A') ? -1 : 1))); state.input = history[historyIndex] ?? ''; state.cursor = graphemes(state.input).length;
       }
     }
-    else if (s === '\x1b[5~') state.scroll += Math.max(3, (stdout.rows || 30) - 12);
-    else if (s === '\x1b[6~') state.scroll = Math.max(0, state.scroll - Math.max(3, (stdout.rows || 30) - 12));
-    else if (s === '\t' || s === '\x1b[Z') {
-      const cards = agentCards(view);
-      if ((state.agentFocus || !state.input) && !state.panel && cards.length) {
-        const delta = s === '\x1b[Z' ? -1 : 1;
-        state.agentIndex = (Math.max(0, state.agentIndex ?? 0) + delta + cards.length) % cards.length;
-        state.scroll = 0;
-      } else if (s === '\t') {
-        const matches = COMMANDS.filter(c => c.startsWith(state.input)); if (matches.length === 1) { state.input = matches[0]!; state.cursor = state.input.length; }
-      }
+    else if (/^\x1b\[5(?:;\d+)?~$/.test(s)) state.scroll += Math.max(3, (stdout.rows || 30) - 12);
+    else if (/^\x1b\[6(?:;\d+)?~$/.test(s)) state.scroll = Math.max(0, state.scroll - Math.max(3, (stdout.rows || 30) - 12));
+    else if (s === '\t') {
+      const matches = COMMANDS.filter(c => c.startsWith(state.input)); if (matches.length === 1) { state.input = matches[0]!; state.cursor = graphemes(state.input).length; }
     }
-    else if (s === '\x1b') { if (state.agentFocus) state.agentFocus = false; else state.panel = ''; state.scroll = 0; }
+    else if (s === '\x1b[Z') { /* Shift+Tab is reserved; footer selection uses arrows like OpenClaude. */ }
+    else if (s === '\x1b') {
+      if (state.agentFocus) { state.agentFocus = false; state.agentSelected = true; }
+      else if (state.agentSelected) state.agentSelected = false;
+      else state.panel = '';
+      state.scroll = 0;
+    }
     else if (!/[\x00-\x1f\x7f]/.test(s)) { if (state.agentFocus) state.notice = 'Escで親画面へ戻ってから入力してください。'; else insert(s); }
     requestRender();
   };
