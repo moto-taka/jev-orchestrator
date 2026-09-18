@@ -14,6 +14,21 @@ Jevはコードや計画文を生成しません。難易度、担当、計画�
 
 **Node.js 22.16.0以降の22.x または24以降、Git、macOS / Linux / WSL** が必要です。通常のTUI・HTTP接続に実行時npm依存はありません。Windows nativeは未対応です。
 
+### Homebrew（Mac / Linux）
+
+privateリポジトリのまま、GitHubのSSH認証でインストールします。
+
+```sh
+brew tap moto-taka/jev-orchestrator \
+  ssh://git@github.com/moto-taka/jev-orchestrator.git
+brew install moto-taka/jev-orchestrator/jvo
+jvo setup
+```
+
+Node.js 24はHomebrewが依存として用意します。既存CLIの認証は変更しません。固定commitからビルドし、Jevへの接続は初回設定時にだけ行います。[更新・認証・検証範囲](docs/homebrew.md)
+
+### ソース / npm経由
+
 ```sh
 git clone https://github.com/moto-taka/jev-orchestrator.git
 cd jev-orchestrator
@@ -41,6 +56,10 @@ jvo demo --json
 ```
 
 デモは **DEMO** と表示し、判断とworkerだけをテスト専用fixtureに置き換えます。実APIへ自動的にフォールバックする経路はありません。
+
+## エージェント間の会話について
+
+現在はJevが報告・レビュー・差し戻しを仲介します。宛先付きの質問・返答・配送確認を持つpeer messagingや外部A2A Protocolはまだ実装していません。agmsg / Orca / Herdr / Pi Messengerを比較し、Jevによる進行制御を維持した[追加設計](docs/agent-messaging.md)を用意しています。Homebrew対応と混同しないよう、実装状況を分けています。
 
 ## Jevの接続先
 

@@ -1,0 +1,49 @@
+name: Homebrew
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Formula/**'
+      - '.github/workflows/homebrew.yml'
+  pull_request:
+    paths:
+      - 'Formula/**'
+      - '.github/workflows/homebrew.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: homebrew-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  install:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      HOMEBREW_NO_ENV_HINTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Node dependency
+        run: brew install node@24
+      - name: Install and test the real formula against the pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Actions already fetched this private repository. Use that exact Git
+          # history as a local mirror; never store a PAT or deploy key in a tap.
+          # This tests Homebrew build/install/test, not the user's SSH setup.
+          source_url='ssh://git@github.com/moto-taka/jev-orchestrator.git'
+          mirror_key="url.file://${GITHUB_WORKSPACE}.insteadOf"
+          git config --global "$mirror_key" "$source_url"
+          trap 'git config --global --unset-all "$mirror_key" || true' EXIT
+          ruby -c Formula/jvo.rb
+          brew tap moto-taka/jev-orchestrator "$GITHUB_WORKSPACE"
+          brew install --build-from-source moto-taka/jev-orchestrator/jvo
+          brew test moto-taka/jev-orchestrator/jvo
+          "$(brew --prefix)/bin/jvo" --version
+          brew list --verbose moto-taka/jev-orchestrator/jvo
