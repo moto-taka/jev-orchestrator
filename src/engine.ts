@@ -834,6 +834,8 @@ export class Engine extends EventEmitter {
     const run = this.run, c = op.candidate;
     const profile = run.config.profiles.find(p => p.id === c.profileId);
     invariant(profile?.enabled && profile.roles.includes(role), 'Selected profile does not allow this role');
+    const effort = c.effort ?? (task.effort && task.profileId === profile.id ? task.effort : this.profileEfforts(profile)[0] ?? 'default');
+    const runtimeProfile = this.runtimeProfile(profile, effort);
     invariant(run.workerStarts < run.config.runtime.maxWorkerStarts, 'Worker start budget reached');
     let task = initial;
     const writer = role === 'implementer';
@@ -844,11 +846,11 @@ export class Engine extends EventEmitter {
     else cwd = await this.ws.create(`${task.id}_${role}_${op.id}`, baseline);
     const beforeRead = !writer ? await fingerprint(cwd) : undefined;
     const resume = writer && ['REWORK_SAME_SESSION', 'CONTINUE_AFTER_PEER'].includes(c.kind) ? task.sessionId : undefined;
-    const affinity = hash({ profile, role, cwd, instructionVersion: run.instructionVersion });
-    if (resume) invariant(task.sessionFingerprint === affinity && task.profileId === profile.id, 'Session affinity changed; select an explicit reassignment instead of corrupting cached context');
+    const affinity = hash({ profile: runtimeProfile, role, cwd, instructionVersion: run.instructionVersion });
+    if (resume) invariant(task.sessionFingerprint === affinity && task.profileId === profile.id && task.effort === effort, 'Session model/effort affinity changed; select an explicit reassignment instead of corrupting cached context');
     const sessionDir = privateDir(join(this.store.root, 'sessions', task.id, writer ? profile.id : op.id));
-    const context = task.contextIds.map(h => this.store.readArtifact(h)).join('\n\n');
     const pack = evidencePack(task.evidence, run.trust.maxEvidenceBytes, this.guard);
+    const handoff = resume ? undefined : await this.buildHandoff(task, role, runtimeProfile, effort, signal);
     let prompt = resume ? `Continue task ${task.spec.id} in this same session and workspace.\nDo not repeat completed work.\nCurrent snapshot: ${baseline}\nUnresolved findings: ${canonical(task.findings.filter(f => f.status !== 'fixed'))}\nLatest runtime proof: ${canonical(pack.items.slice(-4))}\nLatest failure: ${task.lastFailure ?? 'none'}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}${REPORT_CONTRACT}`
       : `You are the ${role} worker, not the orchestrator. Do not spawn agents, push, deploy, alter task ownership, or approve your own work.\n${role === 'reviewer' ? 'Review independently; do not edit any files. Investigate acceptance criteria, security, regressions and unresolved findings. Review round ' + (task.reviewCount + 1) + '.\n' : !writer ? 'Read-only investigation. Do not edit.\n' : 'Edit only the permitted writePaths. Do not modify credentials, excluded files, or other workspaces.\n'}Task: ${canonical(task.spec)}\n${run.pendingMessage ? `User clarification: ${run.pendingMessage}\n` : ''}Snapshot: ${baseline}\nContext:\n${context}\nEvidence:\n${canonical(pack)}\nFindings: ${canonical(task.findings)}\n${REPORT_CONTRACT}`;
     if (writer) prompt += this.mailbox.roster(task);
@@ -856,13 +858,13 @@ export class Engine extends EventEmitter {
     const logPath = safeChild(privateDir(join(this.store.root, 'logs', this.runId)), `${op.id}.jsonl`);
     writeFileSync(logPath, '', { mode: 0o600, flag: 'wx' }); let logged = 0, lastEvent = 0, lastTrace = 0;
     this.store.updateRun(this.runId, { workerStarts: this.run.workerStarts + 1 });
-    this.store.updateTask(task.id, { status: role === 'reviewer' ? 'reviewing' : 'running', activeProfileId: profile.id, activeRole: role, lastActivity: `${profile.id}: ${role}`,
+    this.store.updateTask(task.id, { status: role === 'reviewer' ? 'reviewing' : 'running', activeProfileId: profile.id, activeRole: role, activeEffort: effort, lastActivity: `${profile.id}: ${role} · effort ${effort}`,
       ...(this.lean && writer ? { implementationGrant: op.policy ? task.implementationGrant : { decisionId: op.decisionId, policyHash: this.authorityHash(task) }, acceptanceGrant: undefined } : {}),
-      ...(this.lean && role === 'reviewer' && !op.policy ? { reviewGrant: { decisionId: op.decisionId, profileId: profile.id, profileHash: hash(profile), policyHash: this.authorityHash(task) } } : {}),
-      ...(writer ? { profileId: profile.id, sessionId: resume, sessionFingerprint: affinity, attempts: task.attempts + (c.kind === 'CONTINUE_AFTER_PEER' ? 0 : 1), reviewCount: 0, testsPassed: undefined, reviewedSnapshot: undefined, testedSnapshot: undefined } : {}) });
-    this.log('worker.started', `${this.profileDisplay(profile.id)} · ${role} · ${task.spec.title}`, task.id);
-    this.traceAgent(op.id, task, profile, role, 'started', task.spec.title, task.observedModel, resume);
-    const invocation: Invocation = { id: op.id, runId: this.runId, taskId: task.id, role, profile, cwd, prompt, sessionId: resume, sessionDir, signal,
+      ...(this.lean && role === 'reviewer' && !op.policy ? { reviewGrant: { decisionId: op.decisionId, profileId: profile.id, effort, profileHash: hash(profile), policyHash: this.authorityHash(task) } } : {}),
+      ...(writer ? { profileId: profile.id, effort, sessionId: resume, sessionFingerprint: affinity, attempts: task.attempts + (c.kind === 'CONTINUE_AFTER_PEER' ? 0 : 1), reviewCount: 0, testsPassed: undefined, reviewedSnapshot: undefined, testedSnapshot: undefined } : {}) });
+    this.log('worker.started', `${this.profileDisplay(profile.id, undefined, effort)} · ${role} · ${task.spec.title}`, task.id);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, 'started', task.spec.title, task.observedModel, resume);
+    const invocation: Invocation = { id: op.id, runId: this.runId, taskId: task.id, role, profile: runtimeProfile, effort, cwd, prompt, sessionId: resume, sessionDir, signal,
       onSpawn: (pid, birth) => this.store.put('outbox', op.id, this.runId, { ...this.store.get<Operation>('outbox', op.id), pid, birth }),
       onEvent: e => {
         const clean = { ...e, text: e.text === undefined ? undefined : this.guard.redact(terminalText(e.text)).slice(0, 20_000) };
@@ -870,14 +872,14 @@ export class Engine extends EventEmitter {
         if (logged + Buffer.byteLength(line) <= run.config.runtime.maxLogBytes) { appendFileSync(logPath, line); logged += Buffer.byteLength(line); }
         if (e.type === 'session' && writer && e.sessionId) {
           const current = this.store.task(task.id); this.store.put('tasks', task.id, this.runId, { ...current, sessionId: e.sessionId });
-          this.store.put('sessions', hash({ taskId: task.id, profile: profile.id }), this.runId, { taskId: task.id, sessionId: e.sessionId, affinity, cwd, profile });
+          this.store.put('sessions', hash({ taskId: task.id, profile: profile.id }), this.runId, { taskId: task.id, sessionId: e.sessionId, affinity, cwd, profile: runtimeProfile, effort });
         }
         if (e.type === 'model' && writer && e.model) {
           const current = this.store.task(task.id); this.store.put('tasks', task.id, this.runId, { ...current, observedModel: e.model });
         }
         const important = ['tool', 'model', 'session', 'error', 'done'].includes(e.type) || e.type === 'text' && e.key === 'final';
         if (important || e.type === 'text' && Date.now() - lastTrace > 350) {
-          this.traceAgent(op.id, this.store.task(task.id), profile, role, e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], clean.text, e.model, e.sessionId);
+          this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, e.type === 'usage' ? 'text' : e.type as AgentTrace['type'], clean.text, e.model, e.sessionId);
           lastTrace = Date.now();
         }
         // Transport progress must not invalidate a semantic decision or generate API calls.
@@ -887,7 +889,7 @@ export class Engine extends EventEmitter {
         }
       } };
     const result = await this.adapter.run(invocation);
-    this.store.put('attempts', op.id, this.runId, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, role, cwd, resume, promptHash: hash(prompt), snapshot: baseline }, result: JSON.parse(this.guard.redact(canonical(result))) });
+    this.store.put('attempts', op.id, this.runId, { invocation: { id: op.id, taskId: task.id, profileId: profile.id, effort, role, cwd, resume, promptHash: hash(prompt), snapshot: baseline }, result: JSON.parse(this.guard.redact(canonical(result))) });
     for (const [i, u] of result.usage.entries()) this.store.usage(`${op.id}:${i}`, this.runId, u);
     if (!result.usage.length) this.store.usage(`${op.id}:unknown`, this.runId, { basis: 'unavailable' });
     if (!writer) invariant(await fingerprint(cwd) === beforeRead, 'Read-only worker changed its review snapshot; its report is not admissible');
@@ -905,7 +907,7 @@ export class Engine extends EventEmitter {
       complete({ phase: writer ? 'implement' : role === 'reviewer' ? 'review' : role === 'planner' && task.proposedPlan?.length ? 'plan-review' : 'assess', status: 'reported', lastFailure: failure, sameFailure: same,
         ...(writer ? { sessionId: result.sessionId ?? this.store.task(task.id).sessionId } : {}) });
       this.addEvidence(task.id, 'observation', baseline, failure, 'runtime', 'runtime-observed');
-      this.traceAgent(op.id, this.store.task(task.id), profile, role, 'error', failure, result.model, result.sessionId);
+      this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, 'error', failure, result.model, result.sessionId);
       this.log('worker.failed', failure, task.id);
       if (result.status === 'interrupted' && this.run.status === 'running') this.store.updateRun(this.runId, { status: 'paused', blockReason: failure });
       return;
@@ -943,8 +945,8 @@ export class Engine extends EventEmitter {
       complete({ lastReport: report, diagnoses: task.diagnoses + 1, phase: task.snapshot ? 'judge' : task.workspace ? 'implement' : 'assess', status: 'reported',
         sameFailure: task.sameFailure >= run.config.runtime.maxSameFailure ? 0 : task.sameFailure });
     }
-    this.traceAgent(op.id, this.store.task(task.id), profile, role, 'completed', report.summary, result.model, result.sessionId);
-    this.log('worker.completed', `${this.profileDisplay(profile.id, result.model)} · ${role} · ${report.summary}`, task.id);
+    this.traceAgent(op.id, this.store.task(task.id), runtimeProfile, role, 'completed', report.summary, result.model, result.sessionId);
+    this.log('worker.completed', `${this.profileDisplay(profile.id, result.model, effort)} · ${role} · ${report.summary}`, task.id);
   }
   private addEvidence(taskId: string, kind: Evidence['kind'], snapshot: string, content: string, producer: string, trust: Evidence['trust']): void {
     const clean = this.guard.redact(terminalText(content));
