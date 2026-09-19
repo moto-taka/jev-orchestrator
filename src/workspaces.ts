@@ -16,11 +16,31 @@ export async function git(cwd: string, args: string[], extra: { input?: string; 
   if (!extra.allowFailure) invariant(r.code === 0 && !r.overflow && !r.timedOut, `git ${args[0]} failed: ${r.stderr.slice(0, 2000)}`);
   return r.stdout.trimEnd();
 }
+const NOT_GIT_GUIDANCE = `このディレクトリはGitリポジトリではありません。jvoは既存のGit baselineが必要です。
+先に次を実行してください:
+  git init
+  git status
+  git add <jvoで扱うファイル>
+  git commit -m "Initial commit"
+ファイルがまだない場合:
+  git commit --allow-empty -m "Initial commit"
+その後 jvo を再実行してください。`;
+const NO_HEAD_GUIDANCE = `Gitリポジトリにまだcommitがありません。jvoはHEADをbaselineとして使うため、最初のcommitを作成してください。
+先に次を実行してください:
+  git status
+  git add <jvoで扱うファイル>
+  git commit -m "Initial commit"
+ファイルがまだない場合:
+  git commit --allow-empty -m "Initial commit"
+その後 jvo を再実行してください。`;
 export async function repository(cwd: string): Promise<string> {
-  const repo = realpathSync(await git(cwd, ['rev-parse', '--show-toplevel']));
+  const top = await git(cwd, ['rev-parse', '--show-toplevel'], { allowFailure: true });
+  invariant(top, NOT_GIT_GUIDANCE);
+  const repo = realpathSync(top);
   invariant(await git(repo, ['rev-parse', '--is-bare-repository']) === 'false', 'A working Git repository is required');
-  await git(repo, ['rev-parse', '--verify', 'HEAD']);
-  const filters = await git(repo, ['config', '--local', '--get-regexp', '^filter\..*\.(clean|smudge|process)$'], { allowFailure: true });
+  const head = await git(repo, ['rev-parse', '--verify', 'HEAD'], { allowFailure: true });
+  invariant(head, NO_HEAD_GUIDANCE);
+  const filters = await git(repo, ['config', '--local', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], { allowFailure: true });
   invariant(!filters, 'Repository-local executable Git filters are unsupported. Disable them before automated worktree operations.');
   return repo;
 }
