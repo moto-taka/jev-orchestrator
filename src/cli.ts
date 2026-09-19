@@ -68,7 +68,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === '__supervise') { invariant(args[1] && args[2], 'Missing supervisor arguments'); await supervise(args[1], args[2]); return; }
   const f = flags(args), command = f.positional[0];
   if (f.flags.has('help') || command === 'help' || command === '-h') { console.log(HELP); return; }
-  if (f.flags.has('version') || command === '-v') { console.log('0.4.0'); return; }
+  if (f.flags.has('version') || command === '-v') { console.log('0.4.1'); return; }
   if (command === 'demo') { await demo(f.flags.has('json') || !process.stdin.isTTY); return; }
   // Replay opens only an existing database in read-only mode. It never runs Git,
   // loads a provider key, creates directories, starts a supervisor, or executes a worker.
