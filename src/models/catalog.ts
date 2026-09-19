@@ -153,7 +153,7 @@ export async function discoverModels(cap: Capabilities, options: { globalPiProvi
       }
     } else if (cap.adapter === 'codex') {
       channel = new MetadataChannel(cap.binary, ['app-server'], cwd, env, options.timeoutMs);
-      await channel.request('init', { id: 'init', method: 'initialize', params: { clientInfo: { name: 'jvo_model_picker', title: 'Jev Orchestrator model picker', version: '0.4.0' } } });
+      await channel.request('init', { id: 'init', method: 'initialize', params: { clientInfo: { name: 'jvo_model_picker', title: 'Jev Orchestrator model picker', version: '0.4.1' } } });
       channel.send({ method: 'initialized', params: {} });
       let provider: string | undefined;
       try {
