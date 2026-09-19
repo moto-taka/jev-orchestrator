@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createDemo, DemoAdapter, DemoProvider } from '../src/demo.ts';
 import { startRun, Engine } from '../src/engine.ts';
-import { git, fingerprint, Workspaces, assertChanges } from '../src/workspaces.ts';
+import { git, fingerprint, Workspaces, assertChanges, repository } from '../src/workspaces.ts';
 import type { Operation, Task, Decision } from '../src/types.ts';
 
 test('a dirty original checkout requires explicit baseline selection', async () => {
@@ -47,4 +48,33 @@ test('pending operation is discarded after a user scope change, not executed fro
     const op: Operation = { id: 'stale-op', runId: task.runId, taskId: task.id, decisionId: d.id, candidate, state: 'pending' }; f.store.commitDecision(d, op);
     f.store.updateRun(task.runId, { scopeVersion: 2 }); await f.engine.drive(); assert.equal(f.store.get<Operation>('outbox', op.id)?.state, 'failed'); assert.equal(f.store.get<Operation>('outbox', op.id)?.error, 'Decision preconditions changed before execution');
   } finally { f.store.close(); }
+});
+
+
+test('non-Git directories fail with setup commands instead of raw rev-parse output', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jvo-not-git-'));
+  await assert.rejects(() => repository(dir), error => {
+    const message = String(error);
+    assert.match(message, /Gitリポジトリではありません/);
+    assert.match(message, /git init/);
+    assert.match(message, /git add <jvoで扱うファイル>/);
+    assert.match(message, /git commit -m "Initial commit"/);
+    assert.doesNotMatch(message, /Needed a single revision/);
+    return true;
+  });
+});
+
+test('Git repositories without a first commit explain how to create the baseline', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'jvo-no-head-'));
+  await git(dir, ['init']);
+  writeFileSync(join(dir, 'todo.txt'), 'first file\n');
+  await assert.rejects(() => repository(dir), error => {
+    const message = String(error);
+    assert.match(message, /まだcommitがありません/);
+    assert.match(message, /git status/);
+    assert.match(message, /git add <jvoで扱うファイル>/);
+    assert.match(message, /git commit --allow-empty -m "Initial commit"/);
+    assert.doesNotMatch(message, /Needed a single revision/);
+    return true;
+  });
 });
