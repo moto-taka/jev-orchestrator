@@ -5,8 +5,8 @@ class Jvo < Formula
   # Pin the verified application commit, not the mutable main branch.
   url "ssh://git@github.com/moto-taka/jev-orchestrator.git",
       using: :git,
-      revision: "f7d94a019e7e1623a556e997a5322bc21f304090"
-  version "0.4.0"
+      revision: "6fbb51ffb7bbdbf75286cf408c2259c61962824c"
+  version "0.4.1"
   license "MIT"
 
   depends_on "node@24"
