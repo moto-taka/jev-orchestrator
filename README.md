@@ -1,5 +1,15 @@
 # Jev Orchestrator
 
+## 0.4.1: Git baselineがない場合は操作方法を案内します
+
+jvoはGitの初期化や最初のcommitを自動実行しません。Gitリポジトリではないディレクトリ、または初回commit前のリポジトリで起動した場合は、rawな `git rev-parse` エラーではなく、`git init`・`git status`・`git add`・`git commit` の必要な手順を表示して停止します。
+
+```sh
+brew update
+brew upgrade moto-taka/jev-orchestrator/jvo
+jvo --version # 0.4.1
+```
+
 ## 0.4.0: Review Gate・recipient handoff・Effort routing
 
 Jevは方針・モデル・役割・Effort・例外・最終合否を判断します。通常のA2A配送、同じsessionへの返答、限定した修正、合格後の統合は、承認済み範囲内でコードが進めます。
