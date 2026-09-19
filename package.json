@@ -1,6 +1,6 @@
 {
   "name": "jev-orchestrator",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Jev decides. Your coding CLIs execute. A local, evidence-driven orchestrator.",
   "type": "module",
   "bin": {
